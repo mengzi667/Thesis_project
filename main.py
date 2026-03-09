@@ -20,7 +20,7 @@ from spatial_system import SpatialSystem
 from fleet_manager import FleetManager
 from trip_generator import PoissonTripGenerator
 from user_choice_model import UserChoiceModel
-from or_interface import ORInterface
+from or_interface import ORInterface, generate_synthetic_table
 from metrics_logger import MetricsLogger
 from simulation_engine import SimulationEngine
 
@@ -45,8 +45,16 @@ def build_simulation(seed: int = RANDOM_SEED) -> SimulationEngine:
     # 4. User choice model
     user_model = UserChoiceModel(rng=rng)
 
-    # 5. OR interface (placeholder — synthetic relocation recommendations)
-    or_interface = ORInterface(zone_ids=spatial.all_zone_ids(), rng=rng)
+    # 5. OR interface — build a structured placeholder U_odit table once,
+    #    then inject it into ORInterface as an external structured input.
+    #    To switch to real OR outputs: replace generate_synthetic_table() with
+    #    ORInterface.load_from_csv("or_outputs.csv") or load_from_json().
+    u_odit_table = generate_synthetic_table(
+        zone_ids=spatial.all_zone_ids(),
+        sim_duration=SIM_DURATION,
+        rng=rng,
+    )
+    or_interface = ORInterface(u_odit_table)
 
     # 6. Metrics logger
     logger = MetricsLogger()
@@ -65,6 +73,7 @@ def main() -> None:
     print(f"Building simulation  [seed={RANDOM_SEED}, duration={SIM_DURATION} min, "
           f"zones={NUM_ZONES}, fleet={FLEET_SIZE}]")
     engine = build_simulation()
+    print(f"U_odit table loaded  [{len(engine.or_interface)} entries]")
 
     print("Running simulation ...")
     logger = engine.run(sim_duration=SIM_DURATION)

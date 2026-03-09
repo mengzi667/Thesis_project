@@ -13,6 +13,11 @@ from typing import Dict, List, Optional, Tuple
 
 # ── Per-trip record ───────────────────────────────────────────────────────────
 
+# Possible values for TripRecord.unserved_reason
+UNSERVED_NO_SUPPLY = "no_supply"    # no rentable scooter at origin zone (supply shortage)
+UNSERVED_OPT_OUT   = "user_opt_out" # scooters available but user chose not to rent
+
+
 @dataclass
 class TripRecord:
     """Stores all relevant attributes of a single processed trip request."""
@@ -27,6 +32,7 @@ class TripRecord:
     relocation_offered:  bool
     relocation_accepted: bool
     scooter_id:          Optional[int]
+    unserved_reason:     Optional[str] = None  # None when served; see UNSERVED_* constants
 
 
 # ── MetricsLogger ─────────────────────────────────────────────────────────────
@@ -65,13 +71,21 @@ class MetricsLogger:
         """Return a flat dictionary of aggregated KPIs."""
         total   = len(self.trip_records)
         served  = sum(1 for r in self.trip_records if r.served)
-        unserved = total - served
+        # PRD §14: only "no rentable scooter" counts as true demand loss (EDL-relevant).
+        # User opt-out is a behavioural outcome, not a supply shortage.
+        unserved_no_supply = sum(
+            1 for r in self.trip_records if r.unserved_reason == UNSERVED_NO_SUPPLY
+        )
+        unserved_opt_out = sum(
+            1 for r in self.trip_records if r.unserved_reason == UNSERVED_OPT_OUT
+        )
+        unserved_total = unserved_no_supply + unserved_opt_out
 
         reloc_offered  = sum(1 for r in self.trip_records if r.relocation_offered)
         reloc_accepted = sum(1 for r in self.trip_records if r.relocation_accepted)
         reloc_rejected = reloc_offered - reloc_accepted
 
-        # Fleet utilisation: fraction of recorded trips where a scooter was assigned
+        # Fleet utilisation: fraction of trips where a scooter was actually assigned
         utilisation = served / total if total > 0 else 0.0
 
         # Battery composition averaged over inventory snapshots
@@ -79,10 +93,12 @@ class MetricsLogger:
 
         return {
             # System metrics
-            "total_requests":      total,
-            "served_trips":        served,
-            "unserved_trips":      unserved,
-            "service_rate":        served / total if total > 0 else 0.0,
+            "total_requests":         total,
+            "served_trips":           served,
+            "unserved_trips":         unserved_total,
+            "unserved_no_supply":     unserved_no_supply,   # EDL-relevant
+            "unserved_user_opt_out":  unserved_opt_out,     # behavioural
+            "service_rate":           served / total if total > 0 else 0.0,
             # Behavioural metrics
             "relocation_offers":        reloc_offered,
             "relocation_accepted":      reloc_accepted,
@@ -91,11 +107,11 @@ class MetricsLogger:
                 reloc_accepted / reloc_offered if reloc_offered > 0 else 0.0
             ),
             # Operational metrics
-            "fleet_utilisation":   utilisation,
+            "fleet_utilisation":      utilisation,
             "avg_inventory_inactive": avg_inactive,
             "avg_inventory_low":      avg_low,
             "avg_inventory_high":     avg_high,
-            "num_snapshots":       len(self.snapshot_times),
+            "num_snapshots":          len(self.snapshot_times),
         }
 
     def _avg_battery_composition(self) -> Tuple[float, float, float]:
@@ -119,7 +135,8 @@ class MetricsLogger:
         print(sep)
         print(f"  Total trip requests    : {s['total_requests']}")
         print(f"  Served trips           : {s['served_trips']}")
-        print(f"  Unserved trips         : {s['unserved_trips']}")
+        print(f"  Unserved (no supply)   : {s['unserved_no_supply']}")   # supply shortage / EDL
+        print(f"  Unserved (opt-out)     : {s['unserved_user_opt_out']}")
         print(f"  Service rate           : {s['service_rate']:.1%}")
         print(sep)
         print(f"  Relocation offers      : {s['relocation_offers']}")

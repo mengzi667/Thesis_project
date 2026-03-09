@@ -25,7 +25,7 @@ from fleet_manager import FleetManager, Scooter
 from trip_generator import TripRequest, PoissonTripGenerator
 from user_choice_model import UserChoiceModel
 from or_interface import ORInterface, RelocationOpportunity
-from metrics_logger import MetricsLogger, TripRecord
+from metrics_logger import MetricsLogger, TripRecord, UNSERVED_NO_SUPPLY, UNSERVED_OPT_OUT
 
 
 class SimulationEngine:
@@ -129,10 +129,10 @@ class SimulationEngine:
         available = self.fleet.get_available_scooters(
             trip.origin_zone, current_time=trip.request_time
         )
-        chosen: Optional[Scooter] = self._decide_scooter(available, trip)
 
-        if chosen is None:
-            # No rentable scooter or user opted out — record as unserved
+        # Distinguish supply shortage from user opt-out *before* calling the
+        # choice model, so KPI / EDL analysis can treat them separately.
+        if not available:
             self.logger.log_trip(TripRecord(
                 request_id=trip.request_id,
                 origin_zone=trip.origin_zone,
@@ -145,6 +145,27 @@ class SimulationEngine:
                 relocation_offered=relocation_offered,
                 relocation_accepted=relocation_accepted,
                 scooter_id=None,
+                unserved_reason=UNSERVED_NO_SUPPLY,
+            ))
+            return
+
+        chosen: Optional[Scooter] = self._decide_scooter(available, trip)
+
+        if chosen is None:
+            # Scooters were available but user chose not to rent (opt-out).
+            self.logger.log_trip(TripRecord(
+                request_id=trip.request_id,
+                origin_zone=trip.origin_zone,
+                effective_dest=effective_dest,
+                request_time=trip.request_time,
+                trip_duration=trip.trip_duration,
+                trip_distance=trip.trip_distance,
+                user_type=trip.user_type,
+                served=False,
+                relocation_offered=relocation_offered,
+                relocation_accepted=relocation_accepted,
+                scooter_id=None,
+                unserved_reason=UNSERVED_OPT_OUT,
             ))
             return
 
@@ -173,6 +194,7 @@ class SimulationEngine:
             relocation_offered=relocation_offered,
             relocation_accepted=relocation_accepted,
             scooter_id=chosen.scooter_id,
+            unserved_reason=None,
         ))
 
     # ── Decision hook ─────────────────────────────────────────────────────────
@@ -181,12 +203,20 @@ class SimulationEngine:
         self, available: List[Scooter], trip: TripRequest
     ) -> Optional[Scooter]:
         """
-        Default scooter selection: delegate to the user choice model.
-        FleetManager already returns scooters in high-battery-first order.
+        Default scooter assignment per PRD §14: strictly return the
+        highest-battery available scooter.
 
-        Override or replace this method to plug in an RL agent:
-            return agent.select_action(self._build_state(trip))
+        FleetManager.get_available_scooters() already sorts scooters with
+        high-battery first and descending battery level, so available[0] is
+        always the best choice — no MNL randomness in the default path.
+
+        User opt-out (MNL) is NOT applied here: PRD §14 states a trip is
+        served whenever a rentable scooter is available.  The user choice
+        model's choose_scooter() remains available for RL integration or
+        demand-side behavioural experiments; replace this method body to
+        activate it:
+            return self.user_model.choose_scooter(available, user_type=trip.user_type)
         """
         if not available:
             return None
-        return self.user_model.choose_scooter(available, user_type=trip.user_type)
+        return available[0]   # highest-battery scooter, strict priority (PRD §14)
