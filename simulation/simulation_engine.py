@@ -20,12 +20,12 @@ from __future__ import annotations
 from typing import List, Optional
 
 from config import SIM_DURATION, SNAPSHOT_INTERVAL
-from spatial_system import SpatialSystem
-from fleet_manager import FleetManager, Scooter
-from trip_generator import TripRequest, PoissonTripGenerator
-from user_choice_model import UserChoiceModel
-from or_interface import ORInterface, RelocationOpportunity
-from metrics_logger import MetricsLogger, TripRecord, UNSERVED_NO_SUPPLY, UNSERVED_OPT_OUT
+from simulation.spatial_system import SpatialSystem
+from simulation.fleet_manager import FleetManager, Scooter
+from simulation.trip_generator import TripRequest, PoissonTripGenerator
+from simulation.user_choice_model import UserChoiceModel
+from or_model.or_interface import ORInterface, RelocationOpportunity
+from simulation.metrics_logger import MetricsLogger, TripRecord, UNSERVED_NO_SUPPLY, UNSERVED_OPT_OUT
 
 
 class SimulationEngine:
@@ -51,6 +51,7 @@ class SimulationEngine:
         or_interface: ORInterface,
         logger: MetricsLogger,
         snapshot_interval: float = SNAPSHOT_INTERVAL,
+        verbose: bool = False,
     ) -> None:
         self.spatial = spatial
         self.fleet = fleet
@@ -59,6 +60,7 @@ class SimulationEngine:
         self.or_interface = or_interface
         self.logger = logger
         self.snapshot_interval = snapshot_interval
+        self.verbose = verbose
         self._current_time: float = 0.0
 
     @property
@@ -80,19 +82,23 @@ class SimulationEngine:
 
             # Periodic inventory snapshot
             while self._current_time >= next_snapshot:
+                zone_state = self.spatial.get_state_snapshot()
                 self.logger.snapshot_inventories(
                     time=next_snapshot,
-                    zone_state=self.spatial.get_state_snapshot(),
+                    zone_state=zone_state,
                 )
+                self._print_snapshot(next_snapshot, zone_state)
                 next_snapshot += self.snapshot_interval
 
             self._process_trip(trip)
 
         # Final snapshot at end of simulation
+        zone_state = self.spatial.get_state_snapshot()
         self.logger.snapshot_inventories(
             time=self._current_time,
-            zone_state=self.spatial.get_state_snapshot(),
+            zone_state=zone_state,
         )
+        self._print_snapshot(self._current_time, zone_state, final=True)
         return self.logger
 
     # ── Core simulation loop ─────────────────────────────────────────────────
@@ -112,6 +118,7 @@ class SimulationEngine:
         relocation_offered = reloc_opp is not None
         relocation_accepted = False
         effective_dest = trip.destination_zone
+        extra_walk: float = 0.0
 
         if reloc_opp is not None:
             extra_walk = self.spatial.distance_between(
@@ -147,6 +154,12 @@ class SimulationEngine:
                 scooter_id=None,
                 unserved_reason=UNSERVED_NO_SUPPLY,
             ))
+            if self.verbose:
+                self._print_trip_event(
+                    trip, reloc_opp, extra_walk, relocation_accepted,
+                    chosen=None, effective_dest=effective_dest,
+                    outcome=UNSERVED_NO_SUPPLY,
+                )
             return
 
         chosen: Optional[Scooter] = self._decide_scooter(available, trip)
@@ -167,6 +180,12 @@ class SimulationEngine:
                 scooter_id=None,
                 unserved_reason=UNSERVED_OPT_OUT,
             ))
+            if self.verbose:
+                self._print_trip_event(
+                    trip, reloc_opp, extra_walk, relocation_accepted,
+                    chosen=None, effective_dest=effective_dest,
+                    outcome=UNSERVED_OPT_OUT,
+                )
             return
 
         # ── Step 5 (cont.): Pickup ────────────────────────────────────────────
@@ -196,26 +215,115 @@ class SimulationEngine:
             scooter_id=chosen.scooter_id,
             unserved_reason=None,
         ))
+        if self.verbose:
+            self._print_trip_event(
+                trip, reloc_opp, extra_walk, relocation_accepted,
+                chosen=chosen, effective_dest=effective_dest,
+                outcome="served",
+            )
 
     # ── Decision hook ─────────────────────────────────────────────────────────
+
+    # ── Output helpers ────────────────────────────────────────────────────────
+
+    def _print_snapshot(
+        self,
+        t: float,
+        zone_state: dict,
+        final: bool = False,
+    ) -> None:
+        """
+        Print a tabular inventory snapshot at simulation time *t*.
+        Always printed (not gated on verbose) — snapshots are key milestones.
+        """
+        W = 62
+        BAR = "─" * W
+        stats = self.logger.running_stats()
+        if final:
+            label = "FINAL SNAPSHOT"
+        else:
+            period_idx = int(round(t / self.snapshot_interval))
+            label = f"PERIOD d={period_idx:02d}  |  t={t:.1f} min"
+        print(f"\n{BAR}")
+        print(f"  {label}")
+        srate = stats['served'] / stats['total'] if stats['total'] else 0.0
+        print(
+            f"  Progress : {stats['total']:,} requests | "
+            f"{stats['served']:,} served ({srate:.1%}) | "
+            f"{stats['no_supply']:,} no-supply | "
+            f"{stats['opt_out']:,} opt-out"
+        )
+        # Zone table
+        hdr = f"  {'Zone':>4}  {'Inactive':>8}  {'Low':>5}  {'High':>6}  {'Total':>6}  {'Rentable':>8}"
+        print(f"  {'':─<55}")
+        print(hdr)
+        print(f"  {'':─<55}")
+        for zone_id in sorted(zone_state):
+            inactive, low, high = zone_state[zone_id]
+            total_inv = inactive + low + high
+            rentable  = low + high
+            print(
+                f"  {zone_id:>4}  {inactive:>8}  {low:>5}  {high:>6}"
+                f"  {total_inv:>6}  {rentable:>8}"
+            )
+        print(BAR)
+
+    def _print_trip_event(
+        self,
+        trip: TripRequest,
+        reloc_opp,
+        extra_walk: float,
+        relocation_accepted: bool,
+        chosen,
+        effective_dest: int,
+        outcome: str,
+    ) -> None:
+        """Print a one-trip event block (verbose mode only)."""
+        IND = " " * 14   # indent to align sub-lines under trip header
+        # ── Header line ───────────────────────────────────────────────────
+        print(
+            f"[t={trip.request_time:6.1f} min]  "
+            f"#{trip.request_id:04d}  "
+            f"Z{trip.origin_zone}\u2192Z{trip.destination_zone}  "
+            f"({trip.user_type})"
+        )
+        # ── OR offer line ─────────────────────────────────────────────────
+        if reloc_opp is not None:
+            decision = "\u2713 ACCEPTED" if relocation_accepted else "\u2717 REJECTED"
+            print(
+                f"{IND}OR offer : Z{reloc_opp.original_dest}\u2192Z{reloc_opp.recommended_dest}  "
+                f"+${reloc_opp.incentive_amount:.2f}  extra={extra_walk:.0f}m  \u2192 {decision}"
+            )
+            if relocation_accepted:
+                print(f"{IND}           eff. dest\u2192Z{effective_dest}")
+        else:
+            print(f"{IND}no OR offer")
+        # ── Outcome line ──────────────────────────────────────────────────
+        if outcome == "served" and chosen is not None:
+            print(
+                f"{IND}Scooter #{chosen.scooter_id}  "
+                f"SOC={chosen.battery_level:.0%}  [{chosen.battery_category}]  "
+                f"\u2713 SERVED  drop-off Z{effective_dest}"
+            )
+        elif outcome == UNSERVED_NO_SUPPLY:
+            print(f"{IND}\u2717 UNSERVED  [no supply at Z{trip.origin_zone}]")
+        else:
+            print(f"{IND}\u2717 UNSERVED  [user opt-out]")
 
     def _decide_scooter(
         self, available: List[Scooter], trip: TripRequest
     ) -> Optional[Scooter]:
         """
-        Default scooter assignment per PRD §14: strictly return the
+        Deterministic system rule (PRD §14): always assign the
         highest-battery available scooter.
 
-        FleetManager.get_available_scooters() already sorts scooters with
+        FleetManager.get_available_scooters() sorts candidates with
         high-battery first and descending battery level, so available[0] is
-        always the best choice — no MNL randomness in the default path.
+        always the best choice.
 
-        User opt-out (MNL) is NOT applied here: PRD §14 states a trip is
-        served whenever a rentable scooter is available.  The user choice
-        model's choose_scooter() remains available for RL integration or
-        demand-side behavioural experiments; replace this method body to
-        activate it:
-            return self.user_model.choose_scooter(available, user_type=trip.user_type)
+        UserChoiceModel is NOT involved here — it handles only relocation
+        acceptance (accept_relocation).  For future RL integration, replace
+        this method body with agent.select_action(state).
         """
         if not available:
             return None

@@ -20,7 +20,7 @@ import random
 from dataclasses import dataclass, field
 from typing import Dict, Iterable, List, Optional, Tuple
 
-from config import RELOCATION_OFFER_PROB, RELOCATION_INCENTIVE
+from config import PLANNING_PERIOD, RELOCATION_INCENTIVE, RELOCATION_OFFER_PROB
 
 
 # ── Data structures ───────────────────────────────────────────────────────────
@@ -74,7 +74,7 @@ class ORInterface:
     def __init__(
         self,
         u_odit_table: UoditTable,
-        planning_interval: float = 60.0,
+        planning_interval: float = PLANNING_PERIOD,
     ) -> None:
         self._table: UoditTable = u_odit_table
         self.planning_interval = planning_interval
@@ -108,7 +108,7 @@ class ORInterface:
     def load_from_dict(
         cls,
         records: Iterable[dict],
-        planning_interval: float = 60.0,
+        planning_interval: float = PLANNING_PERIOD,
     ) -> "ORInterface":
         """
         Build an ORInterface from a list of dicts, e.g.:
@@ -132,7 +132,7 @@ class ORInterface:
     def load_from_csv(
         cls,
         filepath: str,
-        planning_interval: float = 60.0,
+        planning_interval: float = PLANNING_PERIOD,
     ) -> "ORInterface":
         """
         Load U_odit table from a CSV file.
@@ -148,7 +148,7 @@ class ORInterface:
     def load_from_json(
         cls,
         filepath: str,
-        planning_interval: float = 60.0,
+        planning_interval: float = PLANNING_PERIOD,
     ) -> "ORInterface":
         """
         Load U_odit table from a JSON file (array of record objects).
@@ -165,7 +165,7 @@ class ORInterface:
 def generate_synthetic_table(
     zone_ids: List[int],
     sim_duration: float,
-    planning_interval: float = 60.0,
+    planning_interval: float = PLANNING_PERIOD,
     offer_probability: float = RELOCATION_OFFER_PROB,
     incentive_amount: float = RELOCATION_INCENTIVE,
     rng: Optional[random.Random] = None,
@@ -206,4 +206,96 @@ def generate_synthetic_table(
                     time_indicator=slot * planning_interval,
                     incentive_amount=incentive_amount,
                 )
+    return table
+
+
+# ── Demand-informed table builder ──────────────────────────────────────────────────
+
+def build_demand_informed_table(
+    demand_profile,              # DemandProfile (from trip_generator)
+    zone_ids: List[int],
+    sim_duration: float,
+    planning_period: float = PLANNING_PERIOD,
+    incentive_amount: float = RELOCATION_INCENTIVE,
+    rng: Optional[random.Random] = None,
+) -> UoditTable:
+    """
+    Build a structured U_odit table driven by a DemandProfile.
+
+    For each planning slot d the algorithm:
+      1. Computes expected net flow per zone:
+            net_flow(z) = arrivals_at_z(d) - departures_from_z(d)
+         Positive -> surplus (supply accumulates); negative -> deficit.
+      2. For each (origin, surplus_dest) pair with non-trivial OD mass,
+         adds a recommendation (origin, surplus_dest -> deficit_zone).
+
+    This approximates an OR plan that re-balances supply from over-served
+    destinations to zones where demand exceeds incoming supply.
+
+    Switching from placeholder to real OR output:
+      Replace this function with ORInterface.load_from_csv("or_outputs.csv").
+    """
+    if rng is None:
+        rng = random.Random()
+
+    num_slots = max(1, int(sim_duration // planning_period) + 1)
+    table: UoditTable = {}
+
+    for slot in range(num_slots):
+        # ── Step 1: net flow per zone ─────────────────────────────────────────
+        net_flow: Dict[int, float] = {
+            z: demand_profile.dest_arrival_rate(z, slot, zone_ids)
+               - demand_profile.rate_for(z, slot)
+            for z in zone_ids
+        }
+
+        deficit_zones = sorted(
+            [z for z in zone_ids if net_flow[z] < 0], key=lambda z: net_flow[z]
+        )
+        surplus_zones = [z for z in zone_ids if net_flow[z] > 0]
+
+        if not deficit_zones or not surplus_zones:
+            continue  # balanced slot — no relocation needed
+
+        # Top half of deficit zones are valid redirect targets
+        top_deficit = deficit_zones[: max(1, len(deficit_zones) // 2 + 1)]
+
+        # ── Step 2: generate recommendations ─────────────────────────────────
+        # For each origin, precompute denominator of OD probability
+        od_denom = {
+            o: max(
+                sum(
+                    max(demand_profile.od_weights.get((o, d2), {}).get(slot, 1.0), 0.0)
+                    for d2 in zone_ids
+                ),
+                1e-9,
+            )
+            for o in zone_ids
+        }
+
+        for orig_dest in surplus_zones:
+            for origin in zone_ids:
+                od_prob = (
+                    max(demand_profile.od_weights.get((origin, orig_dest), {}).get(slot, 1.0), 0.0)
+                    / od_denom[origin]
+                )
+                # Only recommend for OD pairs with material flow
+                if od_prob < 1.0 / (2 * len(zone_ids)):
+                    continue
+
+                candidates = [j for j in top_deficit if j != orig_dest]
+                if not candidates:
+                    continue
+                redirect = rng.choice(candidates)
+
+                key: UoditKey = (origin, orig_dest, slot)
+                if key not in table:
+                    table[key] = RelocationOpportunity(
+                        origin=origin,
+                        original_dest=orig_dest,
+                        recommended_dest=redirect,
+                        time_indicator=slot * planning_period,
+                        incentive_amount=incentive_amount,
+                    )
+
     return table

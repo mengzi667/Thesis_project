@@ -18,7 +18,7 @@ from config import (
     INITIAL_BATTERY_MEAN,
     INITIAL_BATTERY_STD,
 )
-from spatial_system import SpatialSystem
+from simulation.spatial_system import SpatialSystem
 
 
 # ── Enumerations (plain strings for readability in logs) ─────────────────────

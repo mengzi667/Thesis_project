@@ -36,13 +36,9 @@ TRIP_DISTANCE_STD: float = 0.5
 USER_TYPES: list = ["price_sensitive", "time_sensitive", "normal"]
 USER_TYPE_WEIGHTS: list = [0.3, 0.3, 0.4]
 
-# ── User choice model — scooter selection ──────────────────────────────────────
-BETA_BATTERY: float = 1.5            # utility weight: battery level
-BETA_WALKING: float = -0.5           # utility weight: walking distance (normalised)
-BETA_PRICE: float = -1.0             # utility weight: price premium
-OPT_OUT_UTILITY: float = 0.0         # baseline utility for not renting
-
-# ── User choice model — relocation acceptance ──────────────────────────────────
+# ── User choice model — relocation acceptance (MNL) ───────────────────────────────
+# Scooter selection is deterministic (highest-battery first, PRD §14);
+# these parameters apply ONLY to the relocation acceptance decision.
 BETA_INCENTIVE: float = 2.0          # utility weight: incentive amount
 BETA_EXTRA_WALK: float = -1.5        # utility weight: extra walking (normalised)
 BASE_RELOC_UTILITY: float = -0.5     # base utility of accepting relocation
@@ -50,8 +46,13 @@ BASE_RELOC_UTILITY: float = -0.5     # base utility of accepting relocation
 # ── Relocation incentive ───────────────────────────────────────────────────────
 RELOCATION_INCENTIVE: float = 1.5    # monetary units offered for relocation
 
-# ── OR interface (placeholder) ─────────────────────────────────────────────────
-RELOCATION_OFFER_PROB: float = 0.30  # probability a trip has a relocation offer
+# ── Planning horizon ──────────────────────────────────────────────────────────
+PLANNING_PERIOD: float   = 15.0      # minutes — OR slot width & re-planning cadence
+ROLLING_HORIZON: float   = 120.0     # minutes — rolling planning window  (8 periods)
+LOOKAHEAD_HORIZON: float = 240.0     # minutes — demand look-ahead         (16 periods)
 
-# ── Metrics snapshot ───────────────────────────────────────────────────────────
-SNAPSHOT_INTERVAL: float = 60.0      # record inventory state every N minutes
+# ── OR interface (placeholder) ─────────────────────────────────────────────────
+RELOCATION_OFFER_PROB: float = 0.30  # used only by the legacy random synthetic table
+
+# ── Metrics snapshot (aligned to planning period) ─────────────────────────────
+SNAPSHOT_INTERVAL: float = PLANNING_PERIOD   # snapshot at every planning boundary

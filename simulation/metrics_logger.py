@@ -127,25 +127,52 @@ class MetricsLogger:
         n = len(self.inventory_snapshots)
         return totals[0] / n, totals[1] / n, totals[2] / n
 
+    def running_stats(self) -> Dict:
+        """Return live-access counts without full aggregation — used by snapshot printer."""
+        total    = len(self.trip_records)
+        served   = sum(1 for r in self.trip_records if r.served)
+        no_sup   = sum(1 for r in self.trip_records if r.unserved_reason == UNSERVED_NO_SUPPLY)
+        opt_out  = sum(1 for r in self.trip_records if r.unserved_reason == UNSERVED_OPT_OUT)
+        reloc_ok = sum(1 for r in self.trip_records if r.relocation_accepted)
+        return {
+            "total":   total,
+            "served":  served,
+            "no_supply": no_sup,
+            "opt_out":   opt_out,
+            "reloc_accepted": reloc_ok,
+        }
+
     def print_summary(self) -> None:
         s = self.summary()
-        sep = "=" * 52
-        print(sep)
-        print("  Simulation KPI Summary")
-        print(sep)
-        print(f"  Total trip requests    : {s['total_requests']}")
-        print(f"  Served trips           : {s['served_trips']}")
-        print(f"  Unserved (no supply)   : {s['unserved_no_supply']}")   # supply shortage / EDL
-        print(f"  Unserved (opt-out)     : {s['unserved_user_opt_out']}")
-        print(f"  Service rate           : {s['service_rate']:.1%}")
-        print(sep)
-        print(f"  Relocation offers      : {s['relocation_offers']}")
-        print(f"  Relocation accepted    : {s['relocation_accepted']}")
-        print(f"  Relocation rejected    : {s['relocation_rejected']}")
-        print(f"  Relocation acc. rate   : {s['relocation_acceptance_rate']:.1%}")
-        print(sep)
-        print(f"  Fleet utilisation      : {s['fleet_utilisation']:.1%}")
-        print(f"  Avg inactive inventory : {s['avg_inventory_inactive']:.1f}")
-        print(f"  Avg low      inventory : {s['avg_inventory_low']:.1f}")
-        print(f"  Avg high     inventory : {s['avg_inventory_high']:.1f}")
-        print(sep)
+        W = 60
+        SEP  = "=" * W
+        SEP2 = "-" * W
+        print()
+        print(SEP)
+        print("  SIMULATION COMPLETE — KPI Summary".center(W))
+        print(SEP)
+
+        # ── Service metrics ────────────────────────────────────────────────
+        print(f"  {'Metric':<32}  {'Value':>10}")
+        print(SEP2)
+        print(f"  {'Total trip requests':<32}  {s['total_requests']:>10,}")
+        print(f"  {'Served trips':<32}  {s['served_trips']:>10,}")
+        print(f"  {'Unserved — no supply (EDL)':<32}  {s['unserved_no_supply']:>10,}")
+        print(f"  {'Unserved — user opt-out':<32}  {s['unserved_user_opt_out']:>10,}")
+        print(f"  {'Service rate':<32}  {s['service_rate']:>9.1%}")
+        print(SEP2)
+
+        # ── Relocation metrics ─────────────────────────────────────────────
+        print(f"  {'Relocation offers made':<32}  {s['relocation_offers']:>10,}")
+        print(f"  {'Relocation accepted':<32}  {s['relocation_accepted']:>10,}")
+        print(f"  {'Relocation rejected':<32}  {s['relocation_rejected']:>10,}")
+        print(f"  {'Relocation acceptance rate':<32}  {s['relocation_acceptance_rate']:>9.1%}")
+        print(SEP2)
+
+        # ── Fleet metrics ──────────────────────────────────────────────────
+        print(f"  {'Fleet utilisation':<32}  {s['fleet_utilisation']:>9.1%}")
+        print(f"  {'Avg inactive inventory / snap':<32}  {s['avg_inventory_inactive']:>10.1f}")
+        print(f"  {'Avg low inventory / snap':<32}  {s['avg_inventory_low']:>10.1f}")
+        print(f"  {'Avg high inventory / snap':<32}  {s['avg_inventory_high']:>10.1f}")
+        print(f"  {'Inventory snapshots recorded':<32}  {s['num_snapshots']:>10,}")
+        print(SEP)
