@@ -119,6 +119,12 @@ class SimulationEngine:
         relocation_accepted = False
         effective_dest = trip.destination_zone
         extra_walk: float = 0.0
+        user_choice: Optional[str] = None
+
+        rho0_base = 0.0
+        rho1_base = 0.0
+        rho0_offer = 0.0
+        rho1_offer = 0.0
 
         if reloc_opp is not None:
             extra_walk = self.spatial.distance_between(
@@ -141,22 +147,6 @@ class SimulationEngine:
             rho0_offer = offer_zone.inventory_inactive / offer_total
             rho1_offer = offer_zone.inventory_low / offer_total
 
-            relocation_accepted = self.user_model.accept_relocation(
-                incentive_amount=RELOCATION_INCENTIVE,
-                walk_offer=extra_walk,
-                walk_base=0.0,
-                rho0_offer=rho0_offer,
-                rho0_base=rho0_base,
-                rho1_offer=rho1_offer,
-                rho1_base=rho1_base,
-                trip_duration=trip.trip_duration,
-                battery_offer=trip.trip_distance,
-                battery_base=trip.trip_distance,
-                user_type=trip.user_type,
-            )
-            if relocation_accepted:
-                effective_dest = reloc_opp.recommended_dest
-
         # ── Step 5: Scooter selection — default logic: high-battery first ─────
         available = self.fleet.get_available_scooters(
             trip.origin_zone, current_time=trip.request_time
@@ -177,6 +167,7 @@ class SimulationEngine:
                 relocation_offered=relocation_offered,
                 relocation_accepted=relocation_accepted,
                 scooter_id=None,
+                user_choice=None,
                 unserved_reason=UNSERVED_NO_SUPPLY,
             ))
             if self.verbose:
@@ -186,6 +177,50 @@ class SimulationEngine:
                     outcome=UNSERVED_NO_SUPPLY,
                 )
             return
+
+        user_choice = self.user_model.choose_relocation_action(
+            has_offer=relocation_offered,
+            incentive_amount=RELOCATION_INCENTIVE,
+            walk_offer=extra_walk,
+            walk_base=0.0,
+            rho0_offer=rho0_offer,
+            rho0_base=rho0_base,
+            rho1_offer=rho1_offer,
+            rho1_base=rho1_base,
+            trip_duration=trip.trip_duration,
+            # Placeholder: battery utility term intentionally disabled in Scenario 1.
+            battery_offer=0.0,
+            battery_base=0.0,
+            user_type=trip.user_type,
+        )
+
+        if user_choice == "opt_out":
+            self.logger.log_trip(TripRecord(
+                request_id=trip.request_id,
+                origin_zone=trip.origin_zone,
+                effective_dest=effective_dest,
+                request_time=trip.request_time,
+                trip_duration=trip.trip_duration,
+                trip_distance=trip.trip_distance,
+                user_type=trip.user_type,
+                served=False,
+                relocation_offered=relocation_offered,
+                relocation_accepted=False,
+                scooter_id=None,
+                user_choice="opt_out",
+                unserved_reason=UNSERVED_OPT_OUT,
+            ))
+            if self.verbose:
+                self._print_trip_event(
+                    trip, reloc_opp, extra_walk, relocation_accepted,
+                    chosen=None, effective_dest=effective_dest,
+                    outcome=UNSERVED_OPT_OUT,
+                )
+            return
+
+        if user_choice == "offer" and reloc_opp is not None:
+            relocation_accepted = True
+            effective_dest = reloc_opp.recommended_dest
 
         chosen: Optional[Scooter] = self._decide_scooter(available, trip)
 
@@ -203,6 +238,7 @@ class SimulationEngine:
                 relocation_offered=relocation_offered,
                 relocation_accepted=relocation_accepted,
                 scooter_id=None,
+                user_choice=user_choice,
                 unserved_reason=UNSERVED_OPT_OUT,
             ))
             if self.verbose:
@@ -237,6 +273,7 @@ class SimulationEngine:
             relocation_offered=relocation_offered,
             relocation_accepted=relocation_accepted,
             scooter_id=chosen.scooter_id,
+            user_choice=user_choice,
             unserved_reason=None,
         ))
         if self.verbose:

@@ -1,13 +1,13 @@
-# user_choice_model.py
-# User behavioural model — relocation acceptance only.
+﻿# user_choice_model.py
+# User behavioural model — labeled user decision with explicit opt-out.
 #
 # Design assumption (PRD §14):
 #   Scooter selection is a deterministic system rule (highest-battery first);
 #   it is NOT a user choice and this module plays no part in it.
 #
 # This module's sole responsibility is:
-#   accept_relocation() — MNL model for whether a user accepts an OR / RL
-#                          drop-off recommendation.
+#   user decision over labeled alternatives with explicit opt-out:
+#   offer / base / opt_out.
 #
 # It is intentionally independent of the OR interface, fleet state, and any
 # future RL agent.
@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import math
 import random
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from config import (
     BETA_INCENTIVE,
@@ -42,13 +42,15 @@ def _softmax(utilities: List[float]) -> List[float]:
 
 class UserChoiceModel:
     """
-    MNL behavioural model for relocation acceptance only.
+    MNL behavioural model for trip-level user decision with explicit opt-out.
 
     Scooter selection is NOT handled here — that is a deterministic system
     rule (highest-battery first, PRD §14) owned by the simulation engine.
 
-    This class is used solely to decide whether a user accepts an OR / RL
-    drop-off recommendation via accept_relocation().
+    This class outputs one labeled action among:
+      - offer
+      - base
+      - opt_out
     """
 
     def __init__(
@@ -67,8 +69,9 @@ class UserChoiceModel:
 
     # ── Relocation acceptance ─────────────────────────────────────────────────
 
-    def accept_relocation(
+    def choose_relocation_action(
         self,
+        has_offer: bool,
         incentive_amount: float = RELOCATION_INCENTIVE,
         walk_offer: float = 0.0,
         walk_base: float = 0.0,
@@ -80,17 +83,16 @@ class UserChoiceModel:
         battery_offer: float = 0.0,
         battery_base: float = 0.0,
         user_type: str = "normal",
-    ) -> bool:
+    ) -> str:
         """
-        Return True if the user accepts the recommended alternative drop-off zone.
+        Return one of: "offer", "base", "opt_out".
 
-        Decision rule is configurable:
-          - deterministic: accept iff P_offer > P_base
-          - stochastic   : sample Bernoulli(P_offer)
+        Choice set:
+          - has_offer=True  : {"offer", "base", "opt_out"}
+          - has_offer=False : {"base", "opt_out"}
 
-        Utility of both alternatives is computed explicitly:
-          - offer: accept recommended destination
-          - base : keep original destination
+        Probabilities are computed by MNL over the active set.
+        Opt-out utility is normalized to zero.
         """
         _ = user_type  # reserved for future type-specific coefficients
 
@@ -101,7 +103,9 @@ class UserChoiceModel:
         # Shared coefficient scaffold so both alternatives are represented symmetrically.
         beta_rho0 = -0.30
         beta_rho1 = 0.35
-        beta_battery = 0.25
+        # Placeholder: battery effect intentionally disabled for Scenario 1
+        # until a validated battery attribute mapping is finalized.
+        beta_battery = 0.0
         beta_duration = -0.08
 
         v_offer = (
@@ -120,8 +124,103 @@ class UserChoiceModel:
             + beta_duration * duration_n
             + beta_battery * battery_base
         )
+        v_opt_out = 0.0
 
-        p_offer, p_base = _softmax([v_offer, v_base])
+        if has_offer:
+            actions = ["offer", "base", "opt_out"]
+            probs = _softmax([v_offer, v_base, v_opt_out])
+        else:
+            actions = ["base", "opt_out"]
+            probs = _softmax([v_base, v_opt_out])
+
         if self.acceptance_mode == "stochastic":
-            return self.rng.random() < p_offer
-        return p_offer > p_base
+            return self.rng.choices(actions, weights=probs, k=1)[0]
+        return actions[max(range(len(actions)), key=lambda i: probs[i])]
+
+    def choice_probabilities(
+        self,
+        has_offer: bool,
+        incentive_amount: float = RELOCATION_INCENTIVE,
+        walk_offer: float = 0.0,
+        walk_base: float = 0.0,
+        rho0_offer: float = 0.0,
+        rho0_base: float = 0.0,
+        rho1_offer: float = 0.0,
+        rho1_base: float = 0.0,
+        trip_duration: float = 0.0,
+        battery_offer: float = 0.0,
+        battery_base: float = 0.0,
+        user_type: str = "normal",
+    ) -> Dict[str, float]:
+        """Return MNL probabilities for the active choice set."""
+        _ = user_type
+
+        walk_offer_n = walk_offer / max(WALKING_THRESHOLD, 1.0)
+        walk_base_n = walk_base / max(WALKING_THRESHOLD, 1.0)
+        duration_n = trip_duration / 60.0
+
+        beta_rho0 = -0.30
+        beta_rho1 = 0.35
+        # Placeholder: battery effect intentionally disabled for Scenario 1
+        # until a validated battery attribute mapping is finalized.
+        beta_battery = 0.0
+        beta_duration = -0.08
+
+        v_offer = (
+            BASE_RELOC_UTILITY
+            + BETA_INCENTIVE * incentive_amount
+            + BETA_EXTRA_WALK * walk_offer_n
+            + beta_rho0 * rho0_offer
+            + beta_rho1 * rho1_offer
+            + beta_duration * duration_n
+            + beta_battery * battery_offer
+        )
+        v_base = (
+            BETA_EXTRA_WALK * walk_base_n
+            + beta_rho0 * rho0_base
+            + beta_rho1 * rho1_base
+            + beta_duration * duration_n
+            + beta_battery * battery_base
+        )
+        v_opt_out = 0.0
+
+        if has_offer:
+            p_offer, p_base, p_opt_out = _softmax([v_offer, v_base, v_opt_out])
+            return {"offer": p_offer, "base": p_base, "opt_out": p_opt_out}
+        p_base, p_opt_out = _softmax([v_base, v_opt_out])
+        return {"base": p_base, "opt_out": p_opt_out}
+
+    def accept_relocation(
+        self,
+        incentive_amount: float = RELOCATION_INCENTIVE,
+        walk_offer: float = 0.0,
+        walk_base: float = 0.0,
+        rho0_offer: float = 0.0,
+        rho0_base: float = 0.0,
+        rho1_offer: float = 0.0,
+        rho1_base: float = 0.0,
+        trip_duration: float = 0.0,
+        battery_offer: float = 0.0,
+        battery_base: float = 0.0,
+        user_type: str = "normal",
+    ) -> bool:
+        """
+        Backward-compatible helper:
+        return True iff chosen action is "offer".
+        """
+        action = self.choose_relocation_action(
+            has_offer=True,
+            incentive_amount=incentive_amount,
+            walk_offer=walk_offer,
+            walk_base=walk_base,
+            rho0_offer=rho0_offer,
+            rho0_base=rho0_base,
+            rho1_offer=rho1_offer,
+            rho1_base=rho1_base,
+            trip_duration=trip_duration,
+            battery_offer=battery_offer,
+            battery_base=battery_base,
+            user_type=user_type,
+        )
+        return action == "offer"
+

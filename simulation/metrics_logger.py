@@ -32,6 +32,7 @@ class TripRecord:
     relocation_offered:  bool
     relocation_accepted: bool
     scooter_id:          Optional[int]
+    user_choice:         Optional[str] = None  # offer / base / opt_out
     unserved_reason:     Optional[str] = None  # None when served; see UNSERVED_* constants
 
 
@@ -85,6 +86,11 @@ class MetricsLogger:
         reloc_accepted = sum(1 for r in self.trip_records if r.relocation_accepted)
         reloc_rejected = reloc_offered - reloc_accepted
 
+        choice_offer = sum(1 for r in self.trip_records if r.user_choice == "offer")
+        choice_base = sum(1 for r in self.trip_records if r.user_choice == "base")
+        choice_opt_out = sum(1 for r in self.trip_records if r.user_choice == "opt_out")
+        choice_total = choice_offer + choice_base + choice_opt_out
+
         # Fleet utilisation: fraction of trips where a scooter was actually assigned
         utilisation = served / total if total > 0 else 0.0
 
@@ -105,6 +111,18 @@ class MetricsLogger:
             "relocation_rejected":      reloc_rejected,
             "relocation_acceptance_rate": (
                 reloc_accepted / reloc_offered if reloc_offered > 0 else 0.0
+            ),
+            "choice_offer_count":       choice_offer,
+            "choice_base_count":        choice_base,
+            "choice_opt_out_count":     choice_opt_out,
+            "choice_offer_rate": (
+                choice_offer / choice_total if choice_total > 0 else 0.0
+            ),
+            "choice_base_rate": (
+                choice_base / choice_total if choice_total > 0 else 0.0
+            ),
+            "choice_opt_out_rate": (
+                choice_opt_out / choice_total if choice_total > 0 else 0.0
             ),
             # Operational metrics
             "fleet_utilisation":      utilisation,
@@ -167,6 +185,9 @@ class MetricsLogger:
         print(f"  {'Relocation accepted':<32}  {s['relocation_accepted']:>10,}")
         print(f"  {'Relocation rejected':<32}  {s['relocation_rejected']:>10,}")
         print(f"  {'Relocation acceptance rate':<32}  {s['relocation_acceptance_rate']:>9.1%}")
+        print(f"  {'User choice — offer':<32}  {s['choice_offer_count']:>10,} ({s['choice_offer_rate']:>5.1%})")
+        print(f"  {'User choice — base':<32}  {s['choice_base_count']:>10,} ({s['choice_base_rate']:>5.1%})")
+        print(f"  {'User choice — opt-out':<32}  {s['choice_opt_out_count']:>10,} ({s['choice_opt_out_rate']:>5.1%})")
         print(SEP2)
 
         # ── Fleet metrics ──────────────────────────────────────────────────

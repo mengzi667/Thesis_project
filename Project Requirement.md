@@ -267,38 +267,56 @@ User behavior influences two key processes:
 
 ### 10.1 Scooter Selection
 
-Users choose among:
+For the current simulation phase, scooter assignment follows system default logic (high-battery priority) and is not modeled as a separate user-level choice process.
 
-* high-battery scooters
-* low-battery scooters
-* opt-out
-
-Selection probabilities are determined by a discrete choice model.
-
-Important explanatory factors include:
-
-* battery level
-* walking distance
-* pricing
-* user characteristics
+Future extension may re-enable a full scooter-level choice model, but this is not required for Scenario 1.
 
 ### 10.2 Incentive Acceptance
 
-When relocation is offered, the user decides whether to accept the recommended destination.
+To stay consistent with Sara's implementation and the Burghardt parameter source, user decision must be represented as a labeled discrete choice model with an explicit opt-out option.
 
-Acceptance probability depends on:
+Choice set when relocation is offered:
+
+* `offer` (accept recommended destination)
+* `base` (reject recommendation and keep original destination)
+* `opt_out` (do not ride)
+
+Choice set when relocation is not offered:
+
+* `base`
+* `opt_out`
+
+Choice probabilities are computed with MNL:
+
+```math
+P(k)=\frac{\exp(V_k)}{\sum_{m\in\mathcal{C}}\exp(V_m)}
+```
+
+where `k` is one alternative in the active choice set `C`, and the opt-out utility is normalized (`V_opt_out = 0`) unless explicitly reparameterized.
+
+Important explanatory factors include:
 
 * incentive amount
 * additional walking distance
-* user attributes
-* battery-related characteristics
+* battery-related attributes
+* pricing terms
+* user attributes (where available)
 
-Decision outcome:
+Decision realization mode must be configurable:
 
-* accept relocation
-* reject relocation
+* `deterministic`: choose max-probability alternative
+* `stochastic`: draw one alternative from the MNL probability vector
 
 The user choice module must be independent from the OR interface and from the future RL module.
+
+### 10.3 Parameter Consistency Requirement
+
+If Burghardt coefficients are used, variable mapping must be documented before simulation runs:
+
+* variable definition mapping
+* unit and scaling mapping
+* sign consistency checks
+* unsupported variables marked as placeholder or excluded with justification
 
 ---
 
@@ -608,6 +626,9 @@ Decision logic:
 * scooter assignment remains rule-based (highest battery priority at origin)
 * RL action is binary only: offer incentive (`1`) or no offer (`0`)
 * incentive amount is fixed
+* user decision follows labeled choice with opt-out:
+* if `a_t=1`: choose among `offer`, `base`, `opt_out`
+* if `a_t=0`: choose among `base`, `opt_out`
 
 Reward intent:
 
@@ -622,6 +643,7 @@ Decision logic:
 * RL action includes both offer decision and battery-level related operational choice
 * the action space is expanded beyond pure binary offer/no-offer
 * the simulator must preserve compatibility with OR output while allowing RL to explore broader execution choices
+* user decision must still include `opt_out` in every feasible choice set
 
 Reward intent:
 
@@ -635,18 +657,19 @@ Reward intent:
 
 The following three corrections are mandatory for consistency with the current research design.
 
-### 21.1 Correct Offer-Acceptance Probability Logic
+### 21.1 Correct User-Choice Probability Logic (with Opt-Out)
 
-The acceptance layer must use full two-alternative utility evaluation:
+The user choice layer must use full labeled multi-alternative utility evaluation:
 
-* compute `P_offer` from `V_offer`
-* compute `P_base` from `V_base`
-* compare the two alternatives consistently (or equivalently compare utility difference)
+* compute `P_offer`, `P_base`, and `P_opt_out` when offer exists
+* compute `P_base` and `P_opt_out` when no offer exists
+* ensure probabilities are normalized over the active choice set
 
 Implementation requirement:
 
-* acceptance logic must not be simplified in a way that incorrectly changes the intended probability meaning
-* common terms may mathematically cancel in binary logit; this is acceptable only when the retained model form is behaviorally correct for the acceptance decision
+* final decision must be generated from configured mode (`deterministic` or `stochastic`)
+* two-alternative acceptance-only logic is insufficient for final aligned implementation
+* utility terms common across alternatives may cancel mathematically; this is acceptable only if the retained specification remains behaviorally meaningful
 
 ### 21.2 Fixed Incentive Amount
 
