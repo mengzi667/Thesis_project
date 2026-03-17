@@ -69,17 +69,9 @@ def _dist_m(coords: Dict[int, Tuple[float, float]], a: int, b: int) -> float:
 
 
 def _incentive(detour_m: float) -> float:
-    """
-    Incentive schedule:
-      ≤ 500 m  (adjacent zone)   : 1.20  — short detour
-      ≤ 1000 m (one zone gap)    : 1.50  — medium detour
-      > 1000 m (two+ zones away) : 2.00  — long detour, high reward
-    """
-    if detour_m <= WALKING_THRESHOLD:
-        return 1.20
-    if detour_m <= 2 * WALKING_THRESHOLD:
-        return 1.50
-    return 2.00
+    """Controlled experiment setting: fixed incentive for all offers."""
+    _ = detour_m
+    return RELOCATION_INCENTIVE
 
 
 # ── OR decision record ────────────────────────────────────────────────────────

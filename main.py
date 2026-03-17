@@ -47,7 +47,7 @@ def build_simulation(seed: int = RANDOM_SEED, verbose: bool = True) -> Simulatio
     spatial = SpatialSystem.create_grid(num_zones=NUM_ZONES)
 
     # 2. Fleet — scooters distributed across zones with random battery levels
-    fleet = FleetManager(spatial)
+    fleet = FleetManager(spatial, rng=rng)
     fleet.initialize_fleet(fleet_size=FLEET_SIZE, rng=rng)
 
     # 3. Demand profile — zone-time heterogeneous (generator / neutral / attractor zones)

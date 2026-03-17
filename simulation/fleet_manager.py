@@ -12,13 +12,20 @@ from typing import Dict, List, Optional
 
 from config import (
     FLEET_SIZE,
+    BATTERY_HIGH_TO_INACTIVE_POLICY,
     BATTERY_INACTIVE_THRESHOLD,
     BATTERY_LOW_THRESHOLD,
-    BATTERY_CONSUMPTION_PER_KM,
+    BATTERY_MIN_PRIMARY_N_FROM,
+    BATTERY_TRANSITION_CSV,
+    PHI_HL,
+    PHI_LN,
+    SIM_IS_WEEKEND,
+    SIM_START_HOUR,
     INITIAL_BATTERY_MEAN,
     INITIAL_BATTERY_STD,
 )
 from simulation.spatial_system import SpatialSystem
+from simulation.battery_transition import BatteryTransitionModel, TransitionContext
 
 
 # ── Enumerations (plain strings for readability in logs) ─────────────────────
@@ -55,17 +62,48 @@ class Scooter:
             and self.battery_category in (BatteryCategory.LOW, BatteryCategory.HIGH)
         )
 
-    def consume_battery(self, distance_km: float) -> None:
+    def consume_battery(
+        self,
+        arrival_time: float,
+        transition_model: Optional[BatteryTransitionModel],
+        rng: random.Random,
+        sim_is_weekend: int,
+        sim_start_hour: int,
+    ) -> None:
         """
-        Apply battery drain for a completed trip and update category.
-        If battery drops into inactive range the status becomes UNAVAILABLE.
-        Battery transitions:  high → low → inactive
+        Sara-consistent Markov battery transition at trip completion.
+
+        Current implementation uses CSV-based time-conditioned Markov rows:
+          P(next_state | init_state, is_weekend, hour)
+        Fallback keeps legacy fixed-rate Markov when CSV cannot be loaded.
         """
-        self.battery_level = max(
-            0.0, self.battery_level - distance_km * BATTERY_CONSUMPTION_PER_KM
-        )
+
         old_category = self.battery_category
-        self.battery_category = _classify_battery(self.battery_level)
+
+        if transition_model is not None:
+            hour = int((sim_start_hour + (arrival_time // 60)) % 24)
+            ctx = TransitionContext(is_weekend=int(sim_is_weekend), hour=hour)
+            self.battery_category = transition_model.sample_next_state(
+                init_state=old_category,
+                context=ctx,
+                rng=rng,
+            )
+        else:
+            # Compatibility fallback to fixed-rate Markov if CSV model is unavailable.
+            if old_category == BatteryCategory.HIGH:
+                self.battery_category = (
+                    BatteryCategory.LOW if rng.random() < PHI_HL else BatteryCategory.HIGH
+                )
+            elif old_category == BatteryCategory.LOW:
+                self.battery_category = (
+                    BatteryCategory.INACTIVE if rng.random() < PHI_LN else BatteryCategory.LOW
+                )
+            else:
+                self.battery_category = BatteryCategory.INACTIVE
+
+        # Keep SOC display consistent with the discrete category after transition.
+        self.battery_level = _representative_level(self.battery_category)
+
         if self.battery_category == BatteryCategory.INACTIVE:
             self.status = ScooterStatus.UNAVAILABLE
 
@@ -85,9 +123,32 @@ class FleetManager:
     counters consistent with individual scooter records.
     """
 
-    def __init__(self, spatial_system: SpatialSystem) -> None:
+    def __init__(
+        self,
+        spatial_system: SpatialSystem,
+        rng: Optional[random.Random] = None,
+        sim_is_weekend: int = SIM_IS_WEEKEND,
+        sim_start_hour: int = SIM_START_HOUR,
+    ) -> None:
         self.spatial = spatial_system
         self.scooters: Dict[int, Scooter] = {}
+        self.rng = rng or random.Random()
+        self.sim_is_weekend = int(sim_is_weekend)
+        self.sim_start_hour = int(sim_start_hour)
+        self.battery_transition_model: Optional[BatteryTransitionModel] = None
+
+        try:
+            self.battery_transition_model = BatteryTransitionModel.from_csv(
+                csv_path=BATTERY_TRANSITION_CSV,
+                high_to_inactive_policy=BATTERY_HIGH_TO_INACTIVE_POLICY,
+                min_primary_n_from=BATTERY_MIN_PRIMARY_N_FROM,
+            )
+            self.battery_transition_model.validate()
+        except Exception as exc:
+            print(
+                "[FleetManager] warning: failed to load battery transition CSV; "
+                f"falling back to fixed Markov rates. detail={exc}"
+            )
 
     # ── Initialisation ────────────────────────────────────────────────────────
 
@@ -101,7 +162,9 @@ class FleetManager:
         randomly sampled battery levels, then rebuild zone inventory counters.
         """
         if rng is None:
-            rng = random.Random()
+            rng = self.rng
+        else:
+            self.rng = rng
         zone_ids = self.spatial.all_zone_ids()
         self.scooters.clear()
 
@@ -173,7 +236,6 @@ class FleetManager:
         self,
         scooter: Scooter,
         dest_zone: int,
-        distance_km: float,
         arrival_time: float,
     ) -> None:
         """
@@ -183,7 +245,13 @@ class FleetManager:
           3. Update scooter status (idle or unavailable if battery depleted).
           4. Increment the destination zone's inventory.
         """
-        scooter.consume_battery(distance_km)
+        scooter.consume_battery(
+            arrival_time=arrival_time,
+            transition_model=self.battery_transition_model,
+            rng=self.rng,
+            sim_is_weekend=self.sim_is_weekend,
+            sim_start_hour=self.sim_start_hour,
+        )
         scooter.current_zone = dest_zone
         scooter.available_time = arrival_time
 
@@ -202,6 +270,14 @@ def _classify_battery(level: float) -> str:
     if level <= BATTERY_LOW_THRESHOLD:
         return BatteryCategory.LOW
     return BatteryCategory.HIGH
+
+
+def _representative_level(category: str) -> float:
+    if category == BatteryCategory.INACTIVE:
+        return BATTERY_INACTIVE_THRESHOLD * 0.5
+    if category == BatteryCategory.LOW:
+        return (BATTERY_INACTIVE_THRESHOLD + BATTERY_LOW_THRESHOLD) / 2.0
+    return min(1.0, max(BATTERY_LOW_THRESHOLD + 0.05, 0.6))
 
 
 def _delta_zone_inventory(zone, category: str, delta: int) -> None:

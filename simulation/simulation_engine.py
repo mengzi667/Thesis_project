@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from typing import List, Optional
 
-from config import SIM_DURATION, SNAPSHOT_INTERVAL
+from config import RELOCATION_INCENTIVE, SIM_DURATION, SNAPSHOT_INTERVAL
 from simulation.spatial_system import SpatialSystem
 from simulation.fleet_manager import FleetManager, Scooter
 from simulation.trip_generator import TripRequest, PoissonTripGenerator
@@ -124,9 +124,34 @@ class SimulationEngine:
             extra_walk = self.spatial.distance_between(
                 trip.destination_zone, reloc_opp.recommended_dest
             )
+
+            base_zone = self.spatial.get_zone(trip.destination_zone)
+            offer_zone = self.spatial.get_zone(reloc_opp.recommended_dest)
+            base_total = max(
+                1,
+                base_zone.inventory_inactive + base_zone.inventory_low + base_zone.inventory_high,
+            )
+            offer_total = max(
+                1,
+                offer_zone.inventory_inactive + offer_zone.inventory_low + offer_zone.inventory_high,
+            )
+
+            rho0_base = base_zone.inventory_inactive / base_total
+            rho1_base = base_zone.inventory_low / base_total
+            rho0_offer = offer_zone.inventory_inactive / offer_total
+            rho1_offer = offer_zone.inventory_low / offer_total
+
             relocation_accepted = self.user_model.accept_relocation(
-                incentive_amount=reloc_opp.incentive_amount,
-                extra_walking_meters=extra_walk,
+                incentive_amount=RELOCATION_INCENTIVE,
+                walk_offer=extra_walk,
+                walk_base=0.0,
+                rho0_offer=rho0_offer,
+                rho0_base=rho0_base,
+                rho1_offer=rho1_offer,
+                rho1_base=rho1_base,
+                trip_duration=trip.trip_duration,
+                battery_offer=trip.trip_distance,
+                battery_base=trip.trip_distance,
                 user_type=trip.user_type,
             )
             if relocation_accepted:
@@ -196,7 +221,6 @@ class SimulationEngine:
         self.fleet.dropoff_scooter(
             scooter=chosen,
             dest_zone=effective_dest,
-            distance_km=trip.trip_distance,
             arrival_time=arrival_time,
         )
 

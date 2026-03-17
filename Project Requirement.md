@@ -597,6 +597,150 @@ The following are explicitly not required in this phase:
 
 ---
 
-## 20. One-Sentence Summary
+## 20. RL Scenario Design Requirements
+
+To support controlled experimentation before full RL deployment, the project must support two explicit RL scenarios in later phases.
+
+### 20.1 Scenario 1 (Binary Offer, Fixed Scooter Rule)
+
+Decision logic:
+
+* scooter assignment remains rule-based (highest battery priority at origin)
+* RL action is binary only: offer incentive (`1`) or no offer (`0`)
+* incentive amount is fixed
+
+Reward intent:
+
+* reward is based on scenario-specific EDL marginal improvement
+* in this scenario, reward can focus on destination-side impact (`d` and redirected target zone)
+* incentive cost is deducted when an offer is accepted
+
+### 20.2 Scenario 2 (Joint Offer + Battery-Level Decision)
+
+Decision logic:
+
+* RL action includes both offer decision and battery-level related operational choice
+* the action space is expanded beyond pure binary offer/no-offer
+* the simulator must preserve compatibility with OR output while allowing RL to explore broader execution choices
+
+Reward intent:
+
+* reward remains EDL-centered (same core objective as Scenario 1)
+* EDL evaluation scope must include more impacted zones (at minimum origin `o`, destination `d`, and redirected zone)
+* incentive cost is deducted when accepted
+
+---
+
+## 21. Required Corrections to Current Logic
+
+The following three corrections are mandatory for consistency with the current research design.
+
+### 21.1 Correct Offer-Acceptance Probability Logic
+
+The acceptance layer must use full two-alternative utility evaluation:
+
+* compute `P_offer` from `V_offer`
+* compute `P_base` from `V_base`
+* compare the two alternatives consistently (or equivalently compare utility difference)
+
+Implementation requirement:
+
+* acceptance logic must not be simplified in a way that incorrectly changes the intended probability meaning
+* common terms may mathematically cancel in binary logit; this is acceptable only when the retained model form is behaviorally correct for the acceptance decision
+
+### 21.2 Fixed Incentive Amount
+
+Incentive must be fixed for controlled experiments:
+
+* default fixed value: `1 EUR`
+* if OR placeholder input contains different incentive values, the simulation execution layer must enforce the fixed experimental value
+
+### 21.3 Battery Dynamics via Markov State Transition
+
+Battery evolution must follow Sara-style Markov transitions instead of linear deterministic drain:
+
+* state categories: `high`, `low`, `inactive`
+* allowed transitions per trip completion:
+* `high -> low` with transition probability `phi_hl`
+* `low -> inactive` with transition probability `phi_ln`
+* no direct `high -> inactive` transition in the baseline Markov setting
+
+The simulator must keep transition parameters configurable for later calibration with empirical data.
+
+---
+
+## 22. Battery Markov Transition Upgrade (Sara CSV-Based)
+
+The battery transition module must be upgraded from constant transition rates to a time-conditioned transition table based on Sara-provided data.
+
+### 22.1 Data Source and Fields
+
+Input file:
+
+* `30sep-df_battery_decline_probs.csv`
+
+Required columns:
+
+* `is_weekend` (`0` weekday, `1` weekend)
+* `hour` (`0-23`)
+* `init_power_class` (`high` / `low` / `inactive`)
+* `end_power_class` (`high` / `low` / `inactive`)
+* `n` (transition count)
+* `n_from` (total count from `init_power_class` under same condition)
+* `p` (`n / n_from`)
+
+### 22.2 Transition Formula
+
+At trip completion, the simulator must apply:
+
+```math
+P(S_{t+}=j \mid S_t=i,\; is\_weekend=w,\; hour=h)=p_{w,h,i,j}
+```
+
+where `(w, h)` is determined from trip completion time.
+
+### 22.3 Policy for `high -> inactive`
+
+Sara's written description states no direct `high -> inactive` transition, while CSV may contain small non-zero values.
+
+The project must explicitly choose one policy:
+
+* strict-paper policy (recommended): set `P(high -> inactive)=0` and renormalize remaining `high` row probabilities
+* strict-data policy: keep CSV probabilities as provided
+
+This choice must be fixed and documented before RL experiments.
+
+### 22.4 Sparsity Handling and Fallback
+
+Because some `(is_weekend, hour, init_power_class)` groups have low `n_from`, the simulator must support fallback/smoothing:
+
+* primary lookup: `(is_weekend, hour, init_power_class)`
+* fallback 1: `(is_weekend, init_power_class)` aggregated across hours
+* fallback 2: global `(init_power_class)` aggregated across all rows
+
+Optional smoothing by sample size is encouraged.
+
+### 22.5 Integration Requirements
+
+The implementation must:
+
+* replace fixed `phi_hl` / `phi_ln` execution with table-based categorical sampling
+* keep state space as `high`, `low`, `inactive`
+* preserve reproducibility via seeded random generator
+* preserve backward-compatible interface for simulation loop and logging
+
+### 22.6 Validation and Acceptance Criteria
+
+The upgraded module is accepted only if:
+
+* probabilities for each condition-row sum to 1 (after policy processing)
+* no undefined condition causes runtime failure (fallback must work)
+* observed simulated transitions remain within defined state space
+* chosen `high -> inactive` policy is consistently enforced
+* runs are reproducible under fixed random seed
+
+---
+
+## 23. One-Sentence Summary
 
 This project builds a modular, extensible, event-driven shared e-scooter simulation environment that models trip demand, battery dynamics, and user behavior, while interfacing with upstream OR relocation recommendations and supporting future RL-based real-time decision making.

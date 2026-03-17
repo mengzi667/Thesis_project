@@ -118,13 +118,19 @@ class ORInterface:
         """
         table: UoditTable = {}
         for r in records:
+            raw_incentive = float(r.get("incentive_amount", RELOCATION_INCENTIVE))
+            if abs(raw_incentive - RELOCATION_INCENTIVE) > 1e-9:
+                print(
+                    "[ORInterface] warning: incoming incentive_amount="
+                    f"{raw_incentive:.2f} overridden to fixed {RELOCATION_INCENTIVE:.2f}"
+                )
             key: UoditKey = (int(r["origin"]), int(r["original_dest"]), int(r["time_slot"]))
             table[key] = RelocationOpportunity(
                 origin=int(r["origin"]),
                 original_dest=int(r["original_dest"]),
                 recommended_dest=int(r["recommended_dest"]),
                 time_indicator=float(r["time_slot"]) * planning_interval,
-                incentive_amount=float(r.get("incentive_amount", RELOCATION_INCENTIVE)),
+                incentive_amount=RELOCATION_INCENTIVE,
             )
         return cls(table, planning_interval)
 
