@@ -71,7 +71,7 @@ def _aggregate(rows: Iterable[dict], slot_minutes: int) -> List[dict]:
     return list(agg.values())
 
 
-def load_sara_rows(path: str) -> List[dict]:
+def load_sara_rows(path: str, sheet_name: str = "incentive_plan") -> List[dict]:
     ext = os.path.splitext(path)[1].lower()
     if ext == ".csv":
         with open(path, newline="", encoding="utf-8") as f:
@@ -82,6 +82,15 @@ def load_sara_rows(path: str) -> List[dict]:
         if not isinstance(data, list):
             raise ValueError("JSON input must be a list of records")
         return data
+    if ext in {".xlsx", ".xls"}:
+        try:
+            import pandas as pd
+        except Exception as exc:
+            raise ValueError(
+                "Reading Excel input requires pandas + openpyxl installed."
+            ) from exc
+        df = pd.read_excel(path, sheet_name=sheet_name)
+        return df.to_dict(orient="records")
     raise ValueError(f"unsupported adapter input extension: {ext}")
 
 
@@ -89,9 +98,14 @@ def convert_sara_output_to_uodit(
     input_path: str,
     output_path: str,
     slot_minutes: int = 15,
+    sheet_name: str = "incentive_plan",
 ) -> List[dict]:
-    rows = load_sara_rows(input_path)
+    rows = load_sara_rows(input_path, sheet_name=sheet_name)
     mapped = _aggregate(rows, slot_minutes=slot_minutes)
+
+    out_dir = os.path.dirname(output_path)
+    if out_dir:
+        os.makedirs(out_dir, exist_ok=True)
 
     out_ext = os.path.splitext(output_path)[1].lower()
     if out_ext == ".csv":

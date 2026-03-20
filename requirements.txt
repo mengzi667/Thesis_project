@@ -10,6 +10,7 @@ h3>=3.7,<4.0
 # ── Optional (sara_repo execution) ────────────────────────────────────────────
 # Needed if you run sara_repo/main.py and export Excel files.
 xlsxwriter>=3.2
+openpyxl>=3.1
 
 # Gurobi Python API is required only for sara_repo optimization runs.
 # Install this only when Gurobi is available/licensed in your environment.
