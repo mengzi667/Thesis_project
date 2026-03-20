@@ -8,7 +8,7 @@
 from __future__ import annotations
 
 import random
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from config import (
     FLEET_SIZE,
@@ -175,6 +175,37 @@ class FleetManager:
             )
             scooter = Scooter(scooter_id=sid, current_zone=zone_id, battery_level=battery)
             self.scooters[sid] = scooter
+
+        self._rebuild_zone_inventories()
+
+    def initialize_fleet_from_zone_state(
+        self,
+        zone_state: Dict[int, Tuple[int, int, int]],
+    ) -> None:
+        """
+        Deterministically initialize scooters from zone-level counts:
+          zone_state[z] = (inactive_count, low_count, high_count)
+        """
+        self.scooters.clear()
+        sid = 0
+
+        for zone_id in sorted(zone_state.keys()):
+            n_cnt, l_cnt, h_cnt = zone_state[zone_id]
+            for _ in range(max(0, int(n_cnt))):
+                s = Scooter(scooter_id=sid, current_zone=zone_id, battery_level=_representative_level(BatteryCategory.INACTIVE))
+                s.status = ScooterStatus.UNAVAILABLE
+                self.scooters[sid] = s
+                sid += 1
+            for _ in range(max(0, int(l_cnt))):
+                s = Scooter(scooter_id=sid, current_zone=zone_id, battery_level=_representative_level(BatteryCategory.LOW))
+                s.status = ScooterStatus.IDLE
+                self.scooters[sid] = s
+                sid += 1
+            for _ in range(max(0, int(h_cnt))):
+                s = Scooter(scooter_id=sid, current_zone=zone_id, battery_level=_representative_level(BatteryCategory.HIGH))
+                s.status = ScooterStatus.IDLE
+                self.scooters[sid] = s
+                sid += 1
 
         self._rebuild_zone_inventories()
 

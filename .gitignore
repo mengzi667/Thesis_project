@@ -1,0 +1,11 @@
+﻿# Python cache
+__pycache__/
+*.py[cod]
+
+# Local run artifacts
+*.log
+
+# Do not publish reference repo, data, or outputs
+sara_repo/
+data/
+results/

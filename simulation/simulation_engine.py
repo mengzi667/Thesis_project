@@ -1,16 +1,17 @@
 # simulation_engine.py
 # Event-driven simulation engine.
 #
-# Implements the 8-step simulation loop from the requirements:
+# Implements the 9-step simulation loop from the requirements:
 #
 #   Step 1  Trip arrives
 #   Step 2  Query OR interface for relocation opportunity
 #   Step 3  Retrieve recommended target zone (if any)
-#   Step 4  Simulate user relocation decision
-#   Step 5  Select scooter and execute trip
-#   Step 6  Update battery state
-#   Step 7  Update zone inventories
-#   Step 8  Record metrics
+#   Step 4  Layer-1 participation decision (ride vs opt_out)
+#   Step 5  Layer-2 acceptance decision (accept offer vs base)
+#   Step 6  Select scooter and execute trip
+#   Step 7  Update battery state
+#   Step 8  Update zone inventories
+#   Step 9  Record metrics
 #
 # Decision logic (Steps 4-5) is cleanly separated from environment dynamics
 # (Steps 6-7) to allow future RL agent integration with minimal changes.
@@ -19,7 +20,7 @@ from __future__ import annotations
 
 from typing import List, Optional
 
-from config import RELOCATION_INCENTIVE, SIM_DURATION, SNAPSHOT_INTERVAL
+from config import SIM_DURATION, SNAPSHOT_INTERVAL
 from simulation.spatial_system import SpatialSystem
 from simulation.fleet_manager import FleetManager, Scooter
 from simulation.trip_generator import TripRequest, PoissonTripGenerator
@@ -99,13 +100,14 @@ class SimulationEngine:
             zone_state=zone_state,
         )
         self._print_snapshot(self._current_time, zone_state, final=True)
+        self.logger.set_or_injection_metrics(self.or_interface.stats())
         return self.logger
 
     # ── Core simulation loop ─────────────────────────────────────────────────
 
     def _process_trip(self, trip: TripRequest) -> None:
         """
-        Execute the full 8-step loop for a single trip request.
+        Execute the full loop for a single trip request.
         """
         # ── Step 2 & 3: Query OR interface ────────────────────────────────────
         reloc_opp: Optional[RelocationOpportunity] = self.or_interface.query(
@@ -114,38 +116,17 @@ class SimulationEngine:
             request_time=trip.request_time,
         )
 
-        # ── Step 4: User relocation decision ─────────────────────────────────
+        # ── Step 4: Layer-1 participation (ride vs opt_out) ─────────────────
         relocation_offered = reloc_opp is not None
         relocation_accepted = False
         effective_dest = trip.destination_zone
         extra_walk: float = 0.0
         user_choice: Optional[str] = None
 
-        rho0_base = 0.0
-        rho1_base = 0.0
-        rho0_offer = 0.0
-        rho1_offer = 0.0
-
         if reloc_opp is not None:
             extra_walk = self.spatial.distance_between(
                 trip.destination_zone, reloc_opp.recommended_dest
             )
-
-            base_zone = self.spatial.get_zone(trip.destination_zone)
-            offer_zone = self.spatial.get_zone(reloc_opp.recommended_dest)
-            base_total = max(
-                1,
-                base_zone.inventory_inactive + base_zone.inventory_low + base_zone.inventory_high,
-            )
-            offer_total = max(
-                1,
-                offer_zone.inventory_inactive + offer_zone.inventory_low + offer_zone.inventory_high,
-            )
-
-            rho0_base = base_zone.inventory_inactive / base_total
-            rho1_base = base_zone.inventory_low / base_total
-            rho0_offer = offer_zone.inventory_inactive / offer_total
-            rho1_offer = offer_zone.inventory_low / offer_total
 
         # ── Step 5: Scooter selection — default logic: high-battery first ─────
         available = self.fleet.get_available_scooters(
@@ -155,6 +136,8 @@ class SimulationEngine:
         # Distinguish supply shortage from user opt-out *before* calling the
         # choice model, so KPI / EDL analysis can treat them separately.
         if not available:
+            if reloc_opp is not None:
+                self.or_interface.consume_after_decision(reloc_opp, accepted=False)
             self.logger.log_trip(TripRecord(
                 request_id=trip.request_id,
                 origin_zone=trip.origin_zone,
@@ -178,23 +161,17 @@ class SimulationEngine:
                 )
             return
 
-        user_choice = self.user_model.choose_relocation_action(
-            has_offer=relocation_offered,
-            incentive_amount=RELOCATION_INCENTIVE,
-            walk_offer=extra_walk,
+        participates = self.user_model.decide_participation(
             walk_base=0.0,
-            rho0_offer=rho0_offer,
-            rho0_base=rho0_base,
-            rho1_offer=rho1_offer,
-            rho1_base=rho1_base,
             trip_duration=trip.trip_duration,
-            # Placeholder: battery utility term intentionally disabled in Scenario 1.
-            battery_offer=0.0,
-            battery_base=0.0,
+            battery_high=0.0,
+            battery_low=0.0,
             user_type=trip.user_type,
         )
-
-        if user_choice == "opt_out":
+        if not participates:
+            if reloc_opp is not None:
+                self.or_interface.consume_after_decision(reloc_opp, accepted=False)
+            user_choice = "opt_out"
             self.logger.log_trip(TripRecord(
                 request_id=trip.request_id,
                 origin_zone=trip.origin_zone,
@@ -218,14 +195,30 @@ class SimulationEngine:
                 )
             return
 
-        if user_choice == "offer" and reloc_opp is not None:
-            relocation_accepted = True
-            effective_dest = reloc_opp.recommended_dest
+        # ── Step 5: Layer-2 acceptance (conditional on participation) ───────
+        if reloc_opp is not None:
+            relocation_accepted = self.user_model.decide_offer_acceptance(
+                has_offer=True,
+                incentive_amount=reloc_opp.incentive_amount,
+                walk_offer=extra_walk,
+                walk_base=0.0,
+                trip_duration=trip.trip_duration,
+                battery_offer=0.0,
+                battery_base=0.0,
+                user_type=trip.user_type,
+            )
+            if relocation_accepted:
+                effective_dest = reloc_opp.recommended_dest
 
+        if reloc_opp is not None:
+            self.or_interface.consume_after_decision(reloc_opp, accepted=relocation_accepted)
+        user_choice = "offer" if relocation_accepted else "base"
+
+        # ── Step 6: Scooter assignment (Scenario 1: highest battery first) ──
         chosen: Optional[Scooter] = self._decide_scooter(available, trip)
 
         if chosen is None:
-            # Scooters were available but user chose not to rent (opt-out).
+            # Defensive guard: should not happen if 'available' is non-empty.
             self.logger.log_trip(TripRecord(
                 request_id=trip.request_id,
                 origin_zone=trip.origin_zone,
@@ -239,20 +232,20 @@ class SimulationEngine:
                 relocation_accepted=relocation_accepted,
                 scooter_id=None,
                 user_choice=user_choice,
-                unserved_reason=UNSERVED_OPT_OUT,
+                unserved_reason=UNSERVED_NO_SUPPLY,
             ))
             if self.verbose:
                 self._print_trip_event(
                     trip, reloc_opp, extra_walk, relocation_accepted,
                     chosen=None, effective_dest=effective_dest,
-                    outcome=UNSERVED_OPT_OUT,
+                    outcome=UNSERVED_NO_SUPPLY,
                 )
             return
 
-        # ── Step 5 (cont.): Pickup ────────────────────────────────────────────
+        # ── Step 6 (cont.): Pickup ───────────────────────────────────────────
         self.fleet.pickup_scooter(chosen)
 
-        # ── Steps 6 & 7: Drop-off — updates battery + zone inventories ────────
+        # ── Steps 7 & 8: Drop-off — updates battery + zone inventories ──────
         arrival_time = trip.request_time + trip.trip_duration
         self.fleet.dropoff_scooter(
             scooter=chosen,
@@ -260,7 +253,7 @@ class SimulationEngine:
             arrival_time=arrival_time,
         )
 
-        # ── Step 8: Record metrics ────────────────────────────────────────────
+        # ── Step 9: Record metrics ───────────────────────────────────────────
         self.logger.log_trip(TripRecord(
             request_id=trip.request_id,
             origin_zone=trip.origin_zone,

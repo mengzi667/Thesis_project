@@ -4,7 +4,19 @@
 
 # ── Simulation control ─────────────────────────────────────────────────────────
 RANDOM_SEED: int = 42
-SIM_DURATION: float = 480.0          # minutes  (e.g. 8-hour operating window)
+SIM_DURATION: float = 840.0          # minutes  (Sara: 06:00–20:00)
+
+# ── Sara-aligned environment mode ────────────────────────────────────────────
+# When enabled, spatial system + demand + initial fleet state are loaded from
+# Sara data files instead of synthetic grid/profile.
+SARA_DATA_DIR: str = "sara_repo/data"
+SARA_IS_WEEKEND: int = 1
+SARA_SLOT0_HOUR: int = 6
+SARA_ZONE_CAPACITY: int = 10
+SARA_INIT_INVENTORY_CSV: str = ""   # optional CSV (station,n,l,h)
+SARA_INIT_UNIFORM_N: int = 0
+SARA_INIT_UNIFORM_L: int = 4
+SARA_INIT_UNIFORM_H: int = 5
 
 # ── Spatial system ─────────────────────────────────────────────────────────────
 NUM_ZONES: int = 10                  # initial prototype scale (10-20 recommended)
@@ -23,14 +35,14 @@ BATTERY_LOW_THRESHOLD: float = 0.25        # 10-25% → low       (rentable)
                                            # > 25%  → high      (rentable)
 
 # ── Battery Markov transition (Sara CSV-based) ───────────────────────────────
-BATTERY_TRANSITION_CSV: str = "data/30sep-df_battery_decline_probs.csv"
+BATTERY_TRANSITION_CSV: str = "sara_repo/data/30sep-df_battery_decline_probs.csv"
 # Policy for high -> inactive from CSV:
 #   strict-paper: force P(high->inactive)=0 and renormalize high/low row
 #   strict-data : keep CSV as-is
 BATTERY_HIGH_TO_INACTIVE_POLICY: str = "strict-paper"
 BATTERY_MIN_PRIMARY_N_FROM: int = 30
-SIM_IS_WEEKEND: int = 0
-SIM_START_HOUR: int = 0
+SIM_IS_WEEKEND: int = 1
+SIM_START_HOUR: int = 6
 
 # Legacy constant-rate Markov parameters kept for fallback compatibility.
 PHI_HL: float = 0.18
@@ -47,12 +59,51 @@ TRIP_DISTANCE_STD: float = 0.5
 USER_TYPES: list = ["price_sensitive", "time_sensitive", "normal"]
 USER_TYPE_WEIGHTS: list = [0.3, 0.3, 0.4]
 
-# ── User choice model — relocation acceptance (MNL) ───────────────────────────────
-# Scooter selection is deterministic (highest-battery first, PRD §14);
-# these parameters apply ONLY to the relocation acceptance decision.
-BETA_INCENTIVE: float = 2.0          # utility weight: incentive amount
-BETA_EXTRA_WALK: float = -1.5        # utility weight: extra walking (normalised)
-BASE_RELOC_UTILITY: float = -0.5     # base utility of accepting relocation
+# ── Scenario 1 two-layer user behavior (Sara-aligned) ───────────────────────
+# Layer 1 mode:
+#   aggregated_prob : fixed aggregate participation probability (Sara-style)
+#   realtime_choice : compute participation via Sara-consistent utility terms
+FIRST_LAYER_MODE: str = "aggregated_prob"
+# Layer 1 realization is fixed to stochastic Bernoulli(P(ride)) to align with
+# Sara-style probabilistic participation handling.
+SARA_PROB_H: float = 0.70
+SARA_PROB_L: float = 0.18
+SARA_PROB_OUT: float = 0.12
+# Sara first-layer real-time choice defaults (compute_probs_for_class-consistent)
+SARA_FIRST_LAYER_WALK_MIN: float = 2.0
+SARA_FIRST_LAYER_UNLOCK_FEE: float = 1.0
+SARA_FIRST_LAYER_RIDE_FEE_TERM: float = 0.30
+SARA_FIRST_LAYER_PCT_HIGH: float = 50.0
+SARA_FIRST_LAYER_PCT_LOW: float = 25.0
+
+# ── Sara choice-model parameters (mean coefficients) ─────────────────────────
+# Adopted from Sara/Burghardt setting (mean values) for labeled utilities.
+SARA_BETA_ES: float = 10.514
+SARA_BETA_WALK: float = -0.342
+SARA_BETA_UNLOCK: float = -1.419
+SARA_BETA_RIDE: float = -25.147
+SARA_BETA_BATT: float = 0.27
+SARA_BETA_TYPE: float = -1.02
+SARA_BETA_PREV: float = -1.79
+SARA_BETA_BIKE: float = -2.21
+SARA_BETA_INCOME: float = -1.18
+SARA_BETA_ALONE: float = 1.21
+SARA_BETA_SHARED: float = -0.86
+SARA_ETA_ATT: float = 0.82
+SARA_ETA_RANGE: float = -0.58
+SARA_RANGE_PER_PCT_KM: float = 0.6
+
+# Default labeled-alternative attributes used in simulation.
+SARA_USER_VEHICLE_TYPE_25: int = 1
+SARA_USER_PREVIOUS_USE: int = 1
+SARA_USER_BIKE: int = 0
+SARA_USER_INCOME_LOW: int = 0
+SARA_USER_LIVING_ALONE: int = 0
+SARA_USER_LIVING_SHARED: int = 0
+SARA_USER_ATTITUDE: float = 0.0
+SARA_USER_RANGE_ANXIETY: float = 0.0
+
+# Acceptance model remains configurable for deterministic/stochastic realization.
 # Acceptance decision mode:
 #   deterministic -> accept iff P_offer > P_base
 #   stochastic    -> draw z_t ~ Bernoulli(P_offer)
@@ -68,6 +119,29 @@ LOOKAHEAD_HORIZON: float = 240.0     # minutes — demand look-ahead         (16
 
 # ── OR interface (placeholder) ─────────────────────────────────────────────────
 RELOCATION_OFFER_PROB: float = 0.30  # used only by the legacy random synthetic table
+
+# ── OR static injection (Sara Level 1 integration) ───────────────────────────
+# Input format and source
+OR_INPUT_FORMAT: str = "csv"  # csv | json
+OR_INPUT_PATH: str = "data/input/u_odit.csv"
+
+# Experimental incentive policy
+OR_FORCE_FIXED_INCENTIVE: bool = True
+OR_FIXED_INCENTIVE_EUR: float = 1.0
+
+# Quota consumption policy
+#   consume_on_accept: consume quota only when user accepts offer
+#   consume_on_offer : consume quota immediately when offer is made
+OR_QUOTA_CONSUME_POLICY: str = "consume_on_accept"
+
+# Time-slot audit settings
+OR_SLOT_MINUTES: int = 15
+OR_TIME_BASE: str = "06:00->slot0"
+
+# Data validation behavior
+#   strict : raise error on dirty rows
+#   lenient: skip dirty rows with warning
+OR_VALIDATION_MODE: str = "strict"
 
 # ── Metrics snapshot (aligned to planning period) ─────────────────────────────
 SNAPSHOT_INTERVAL: float = PLANNING_PERIOD   # snapshot at every planning boundary

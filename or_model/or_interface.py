@@ -18,9 +18,17 @@ import csv
 import json
 import random
 from dataclasses import dataclass, field
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Tuple, Union
 
-from config import PLANNING_PERIOD, RELOCATION_INCENTIVE, RELOCATION_OFFER_PROB
+from config import (
+    OR_FIXED_INCENTIVE_EUR,
+    OR_FORCE_FIXED_INCENTIVE,
+    OR_QUOTA_CONSUME_POLICY,
+    OR_VALIDATION_MODE,
+    PLANNING_PERIOD,
+    RELOCATION_INCENTIVE,
+    RELOCATION_OFFER_PROB,
+)
 
 
 # ── Data structures ───────────────────────────────────────────────────────────
@@ -39,18 +47,20 @@ class RelocationOpportunity:
     recommended_dest: int
     time_indicator:   float          # planning-interval start time (minutes)
     incentive_amount: float = field(default=RELOCATION_INCENTIVE)
+    quota:            int = field(default=1)
+    quota_remaining:  int = field(default=1)
 
     def __repr__(self) -> str:
         return (
             f"RelocOpp(o={self.origin}→d={self.original_dest}"
             f"→i={self.recommended_dest}, t={self.time_indicator:.1f}, "
-            f"inc={self.incentive_amount})"
+            f"inc={self.incentive_amount}, q={self.quota_remaining}/{self.quota})"
         )
 
 
 # Key type: (origin, original_dest, time_slot_index)
 UoditKey   = Tuple[int, int, int]
-UoditTable = Dict[UoditKey, RelocationOpportunity]
+UoditTable = Dict[UoditKey, List[RelocationOpportunity]]
 
 
 # ── Interface ─────────────────────────────────────────────────────────────────
@@ -73,11 +83,25 @@ class ORInterface:
 
     def __init__(
         self,
-        u_odit_table: UoditTable,
+        u_odit_table: Union[UoditTable, Dict[UoditKey, RelocationOpportunity]],
         planning_interval: float = PLANNING_PERIOD,
+        quota_consume_policy: str = OR_QUOTA_CONSUME_POLICY,
     ) -> None:
-        self._table: UoditTable = u_odit_table
+        self._table: UoditTable = {}
+        for key, value in u_odit_table.items():
+            if isinstance(value, RelocationOpportunity):
+                self._table[key] = [value]
+            else:
+                self._table[key] = list(value)
         self.planning_interval = planning_interval
+        self.quota_consume_policy = quota_consume_policy
+
+        # OR injection layer metrics
+        self.or_rows_loaded = sum(len(rows) for rows in self._table.values())
+        self.or_offer_attempts = 0
+        self.or_offer_blocked_by_quota = 0
+        self.or_quota_consumed = 0
+        self.or_incentive_overridden_count = 0
 
     # ── Stable query contract ─────────────────────────────────────────────────
 
@@ -94,13 +118,75 @@ class ORInterface:
         time_slot), otherwise None.  No randomness is involved here.
         """
         slot = int(request_time // self.planning_interval)
-        return self._table.get((origin, destination, slot))
+        candidates = self._table.get((origin, destination, slot))
+        if not candidates:
+            return None
+
+        self.or_offer_attempts += 1
+        eligible = [row for row in candidates if row.quota_remaining > 0]
+        if not eligible:
+            self.or_offer_blocked_by_quota += 1
+            return None
+
+        # Deterministic tie-break: prioritize highest remaining quota, then smaller zone id.
+        row = sorted(
+            eligible,
+            key=lambda x: (-x.quota_remaining, x.recommended_dest),
+        )[0]
+
+        if self.quota_consume_policy == "consume_on_offer":
+            self._consume_one(row)
+        return row
+
+    def consume_after_decision(
+        self,
+        opportunity: Optional[RelocationOpportunity],
+        accepted: bool,
+    ) -> None:
+        """
+        Finalize quota consumption based on configured policy.
+
+        - consume_on_accept: consume only when accepted is True
+        - consume_on_offer : already consumed in query()
+        """
+        if opportunity is None:
+            return
+        if self.quota_consume_policy == "consume_on_accept" and accepted:
+            self._consume_one(opportunity)
+
+    def _consume_one(self, opportunity: RelocationOpportunity) -> None:
+        if opportunity.quota_remaining <= 0:
+            return
+        opportunity.quota_remaining -= 1
+        self.or_quota_consumed += 1
+
+    def stats(self) -> Dict[str, int]:
+        active_rows = sum(
+            1
+            for rows in self._table.values()
+            for row in rows
+            if row.quota_remaining > 0
+        )
+        quota_remaining = sum(
+            max(0, row.quota_remaining)
+            for rows in self._table.values()
+            for row in rows
+        )
+        return {
+            "or_rows_loaded": self.or_rows_loaded,
+            "or_rows_active_in_horizon": active_rows,
+            "or_offer_attempts": self.or_offer_attempts,
+            "or_offer_blocked_by_quota": self.or_offer_blocked_by_quota,
+            "or_quota_consumed": self.or_quota_consumed,
+            "or_quota_remaining_end": quota_remaining,
+            "or_incentive_overridden_count": self.or_incentive_overridden_count,
+        }
 
     # ── Inspection helpers ────────────────────────────────────────────────────
 
     def __len__(self) -> int:
         """Number of (o, d, slot) entries in the loaded table."""
-        return len(self._table)
+        return sum(len(rows) for rows in self._table.values())
 
     # ── Loaders (structured external input sources) ───────────────────────────
 
@@ -109,6 +195,12 @@ class ORInterface:
         cls,
         records: Iterable[dict],
         planning_interval: float = PLANNING_PERIOD,
+        quota_consume_policy: str = OR_QUOTA_CONSUME_POLICY,
+        force_fixed_incentive: bool = OR_FORCE_FIXED_INCENTIVE,
+        fixed_incentive_eur: float = OR_FIXED_INCENTIVE_EUR,
+        validation_mode: str = OR_VALIDATION_MODE,
+        valid_zone_ids: Optional[set] = None,
+        max_time_slot: Optional[int] = None,
     ) -> "ORInterface":
         """
         Build an ORInterface from a list of dicts, e.g.:
@@ -117,28 +209,93 @@ class ORInterface:
               "time_slot": 2, "incentive_amount": 1.5}, ...]
         """
         table: UoditTable = {}
+        overridden_count = 0
+
+        strict = str(validation_mode).strip().lower() == "strict"
+
+        def _invalid(msg: str) -> None:
+            if strict:
+                raise ValueError(msg)
+            print(f"[ORInterface] warning: {msg}")
+
         for r in records:
-            raw_incentive = float(r.get("incentive_amount", RELOCATION_INCENTIVE))
-            if abs(raw_incentive - RELOCATION_INCENTIVE) > 1e-9:
-                print(
-                    "[ORInterface] warning: incoming incentive_amount="
-                    f"{raw_incentive:.2f} overridden to fixed {RELOCATION_INCENTIVE:.2f}"
+            try:
+                origin = int(r["origin"])
+                original_dest = int(r["original_dest"])
+                recommended_dest = int(r["recommended_dest"])
+                time_slot = int(r["time_slot"])
+                quota = int(float(r.get("quota", 1)))
+                raw_incentive = float(r.get("incentive_amount", RELOCATION_INCENTIVE))
+            except Exception as exc:
+                _invalid(f"row parse failed: {exc}; row={r}")
+                continue
+
+            if quota < 0:
+                _invalid(f"negative quota found, clipped to 0; row={r}")
+                quota = 0
+
+            if recommended_dest == original_dest:
+                _invalid(f"recommended_dest == original_dest not allowed; row={r}")
+                continue
+
+            if valid_zone_ids is not None:
+                if origin not in valid_zone_ids or original_dest not in valid_zone_ids or recommended_dest not in valid_zone_ids:
+                    _invalid(f"zone id out of range; row={r}")
+                    continue
+
+            if max_time_slot is not None and (time_slot < 0 or time_slot > max_time_slot):
+                _invalid(f"time_slot out of simulation horizon; row={r}")
+                continue
+
+            if force_fixed_incentive:
+                if abs(raw_incentive - fixed_incentive_eur) > 1e-9:
+                    overridden_count += 1
+                incentive = fixed_incentive_eur
+            else:
+                incentive = raw_incentive
+
+            if quota == 0:
+                continue
+
+            key: UoditKey = (origin, original_dest, time_slot)
+            if key not in table:
+                table[key] = []
+
+            # Merge same target-i rows; keep different i rows as separate candidates.
+            merged = False
+            for opp in table[key]:
+                if opp.recommended_dest == recommended_dest:
+                    opp.quota += quota
+                    opp.quota_remaining += quota
+                    merged = True
+                    break
+            if not merged:
+                table[key].append(
+                    RelocationOpportunity(
+                        origin=origin,
+                        original_dest=original_dest,
+                        recommended_dest=recommended_dest,
+                        time_indicator=float(time_slot) * planning_interval,
+                        incentive_amount=incentive,
+                        quota=quota,
+                        quota_remaining=quota,
+                    )
                 )
-            key: UoditKey = (int(r["origin"]), int(r["original_dest"]), int(r["time_slot"]))
-            table[key] = RelocationOpportunity(
-                origin=int(r["origin"]),
-                original_dest=int(r["original_dest"]),
-                recommended_dest=int(r["recommended_dest"]),
-                time_indicator=float(r["time_slot"]) * planning_interval,
-                incentive_amount=RELOCATION_INCENTIVE,
-            )
-        return cls(table, planning_interval)
+        obj = cls(table, planning_interval, quota_consume_policy=quota_consume_policy)
+        obj.or_incentive_overridden_count = overridden_count
+        return obj
 
     @classmethod
     def load_from_csv(
         cls,
         filepath: str,
         planning_interval: float = PLANNING_PERIOD,
+        quota_consume_policy: str = OR_QUOTA_CONSUME_POLICY,
+        force_fixed_incentive: bool = OR_FORCE_FIXED_INCENTIVE,
+        fixed_incentive_eur: float = OR_FIXED_INCENTIVE_EUR,
+        validation_mode: str = OR_VALIDATION_MODE,
+        valid_zone_ids: Optional[set] = None,
+        max_time_slot: Optional[int] = None,
     ) -> "ORInterface":
         """
         Load U_odit table from a CSV file.
@@ -148,20 +305,44 @@ class ORInterface:
         """
         with open(filepath, newline="", encoding="utf-8") as f:
             reader = csv.DictReader(f)
-            return cls.load_from_dict(reader, planning_interval)
+            return cls.load_from_dict(
+                reader,
+                planning_interval,
+                quota_consume_policy=quota_consume_policy,
+                force_fixed_incentive=force_fixed_incentive,
+                fixed_incentive_eur=fixed_incentive_eur,
+                validation_mode=validation_mode,
+                valid_zone_ids=valid_zone_ids,
+                max_time_slot=max_time_slot,
+            )
 
     @classmethod
     def load_from_json(
         cls,
         filepath: str,
         planning_interval: float = PLANNING_PERIOD,
+        quota_consume_policy: str = OR_QUOTA_CONSUME_POLICY,
+        force_fixed_incentive: bool = OR_FORCE_FIXED_INCENTIVE,
+        fixed_incentive_eur: float = OR_FIXED_INCENTIVE_EUR,
+        validation_mode: str = OR_VALIDATION_MODE,
+        valid_zone_ids: Optional[set] = None,
+        max_time_slot: Optional[int] = None,
     ) -> "ORInterface":
         """
         Load U_odit table from a JSON file (array of record objects).
         """
         with open(filepath, encoding="utf-8") as f:
             records = json.load(f)
-        return cls.load_from_dict(records, planning_interval)
+        return cls.load_from_dict(
+            records,
+            planning_interval,
+            quota_consume_policy=quota_consume_policy,
+            force_fixed_incentive=force_fixed_incentive,
+            fixed_incentive_eur=fixed_incentive_eur,
+            validation_mode=validation_mode,
+            valid_zone_ids=valid_zone_ids,
+            max_time_slot=max_time_slot,
+        )
 
 
 # ── Placeholder table generator ───────────────────────────────────────────────
@@ -205,13 +386,13 @@ def generate_synthetic_table(
                     continue
                 recommended = rng.choice(candidates)
                 key: UoditKey = (origin, dest, slot)
-                table[key] = RelocationOpportunity(
+                table[key] = [RelocationOpportunity(
                     origin=origin,
                     original_dest=dest,
                     recommended_dest=recommended,
                     time_indicator=slot * planning_interval,
                     incentive_amount=incentive_amount,
-                )
+                )]
     return table
 
 
@@ -296,12 +477,12 @@ def build_demand_informed_table(
 
                 key: UoditKey = (origin, orig_dest, slot)
                 if key not in table:
-                    table[key] = RelocationOpportunity(
+                    table[key] = [RelocationOpportunity(
                         origin=origin,
                         original_dest=orig_dest,
                         recommended_dest=redirect,
                         time_indicator=slot * planning_period,
                         incentive_amount=incentive_amount,
-                    )
+                    )]
 
     return table

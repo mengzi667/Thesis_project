@@ -434,17 +434,17 @@ def main() -> None:
     print()
 
     # Write outputs
-    write_csv(decisions, "data/or_output.csv")
-    print("  Wrote: data/or_output.csv")
+    write_csv(decisions, "data/generated/or_output.csv")
+    print("  Wrote: data/generated/or_output.csv")
 
-    write_json(decisions, "data/or_output.json")
-    print("  Wrote: data/or_output.json")
+    write_json(decisions, "data/generated/or_output.json")
+    print("  Wrote: data/generated/or_output.json")
 
-    write_report(decisions, zone_ids, demand_profile, "data/or_report.txt")
-    print("  Wrote: data/or_report.txt")
+    write_report(decisions, zone_ids, demand_profile, "data/generated/or_report.txt")
+    print("  Wrote: data/generated/or_report.txt")
     print()
     print("  To use in simulation, change main.py:")
-    print("    or_interface = ORInterface.load_from_csv(\"data/or_output.csv\")")
+    print("    or_interface = ORInterface.load_from_csv(\"data/generated/or_output.csv\")")
     print("=" * W)
 
 

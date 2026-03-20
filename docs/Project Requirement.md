@@ -25,12 +25,12 @@ At the current stage, OR outputs will be represented by structured placeholder i
 
 ### 2.1 Included in Current Phase
 
-- spatial system representation (zones / grid)
+- spatial system representation (Sara H3 station data, zone IDs 1..N)
 - scooter fleet simulation
 - battery dynamics
 - stochastic trip request generation
 - user behavior modeling
-- relocation recommendation interface (OR placeholder)
+- relocation recommendation interface (OR external-input injection via `U_odit`)
 - event-driven simulation engine
 - system state updates
 - KPI collection
@@ -262,8 +262,8 @@ The simulator must allow future replacement of the trip generation mechanism wit
 
 User behavior influences two key processes:
 
-1. scooter selection
-2. relocation acceptance
+1. ride participation (ride vs opt-out)
+2. relocation acceptance (accept vs reject offer)
 
 ### 10.1 Scooter Selection
 
@@ -271,47 +271,56 @@ For the current simulation phase, scooter assignment follows system default logi
 
 Future extension may re-enable a full scooter-level choice model, but this is not required for Scenario 1.
 
-### 10.2 Incentive Acceptance
+### 10.2 Two-Layer Decision Structure (Sara-Aligned)
 
-To stay consistent with Sara's implementation and the Burghardt parameter source, user decision must be represented as a labeled discrete choice model with an explicit opt-out option.
+To stay consistent with Sara's implementation logic and Burghardt-based parameterization, user behavior must follow a two-layer structure:
 
-Choice set when relocation is offered:
+Layer 1 (participation):
 
-* `offer` (accept recommended destination)
-* `base` (reject recommendation and keep original destination)
-* `opt_out` (do not ride)
+* decide `ride` or `opt_out`
+* this layer determines whether the request enters trip execution at all
 
-Choice set when relocation is not offered:
+Layer 2 (relocation acceptance, conditional on ride):
 
-* `base`
-* `opt_out`
+* if relocation offer exists, decide `accept_offer` or `reject_offer`
+* if no offer exists, keep original destination by default
 
-Choice probabilities are computed with MNL:
+Opt-out belongs to Layer 1 only and must not be mixed into Layer 2.
+
+### 10.3 Layer 1 Modes (Scenario 1 Requirement)
+
+Scenario 1 must support two interchangeable modes for Layer 1:
+
+* `aggregated_prob`: use fixed Sara-style aggregate participation rates
+* `realtime_choice`: compute participation probability from Sara-consistent utility mapping at request time
+
+In Scenario 1, scooter assignment remains rule-based (highest-battery-first) regardless of Layer 1 mode.
+
+Current implementation note:
+
+* Layer 1 decision realization is stochastic only (Bernoulli(P(ride))) in both modes
+* deterministic toggle is not used for Layer 1
+
+### 10.4 Incentive Acceptance (Layer 2)
+
+Layer 2 must only model acceptance conditional on `ride=1`.
+
+For Sara-aligned execution, the baseline acceptance representation is a structured acceptability mapping over `(o,d,i)` (or equivalent OR-compatible structure), while keeping the interface replaceable when real OR outputs are connected.
+
+If a probabilistic acceptance extension is used later, it must still remain conditional on Layer 1 participation.
+
+Current implementation note:
+
+* Layer 2 currently uses online binary utility choice (offer vs ase)
+* acceptance realization mode is configurable (deterministic or stochastic)
+
+### 10.5 Parameter Consistency Requirement
+
+If Burghardt coefficients are used in `realtime_choice`, variable mapping must be documented before simulation runs:
 
 ```math
 P(k)=\frac{\exp(V_k)}{\sum_{m\in\mathcal{C}}\exp(V_m)}
 ```
-
-where `k` is one alternative in the active choice set `C`, and the opt-out utility is normalized (`V_opt_out = 0`) unless explicitly reparameterized.
-
-Important explanatory factors include:
-
-* incentive amount
-* additional walking distance
-* battery-related attributes
-* pricing terms
-* user attributes (where available)
-
-Decision realization mode must be configurable:
-
-* `deterministic`: choose max-probability alternative
-* `stochastic`: draw one alternative from the MNL probability vector
-
-The user choice module must be independent from the OR interface and from the future RL module.
-
-### 10.3 Parameter Consistency Requirement
-
-If Burghardt coefficients are used, variable mapping must be documented before simulation runs:
 
 * variable definition mapping
 * unit and scaling mapping
@@ -406,21 +415,28 @@ If no relocation opportunity exists, the trip follows the default execution path
 
 #### Step 4: Simulate User Decision
 
-If a relocation recommendation exists, the simulator evaluates user acceptance using the user choice model.
+Layer 1 decision: simulate `ride` vs `opt_out`.
 
 Possible outcomes:
 
-* accept recommended target zone
-* reject and keep original destination
+* `opt_out`: stop request processing
+* `ride`: continue to Layer 2
 
-#### Step 5: Execute Trip
+#### Step 5: Simulate Offer Acceptance (Conditional)
+
+If `ride=1` and relocation recommendation exists, evaluate Layer 2 acceptance:
+
+* `accept_offer`: use recommended target zone
+* `reject_offer`: keep original destination
+
+#### Step 6: Execute Trip
 
 The scooter is assigned and the trip is executed from:
 
 * origin → original destination
 * or origin → recommended destination
 
-#### Step 6: Update Battery State
+#### Step 7: Update Battery State
 
 Battery degradation is applied after trip completion.
 
@@ -429,14 +445,14 @@ Possible transitions:
 * high → low
 * low → inactive
 
-#### Step 7: Update Zone Inventories
+#### Step 8: Update Zone Inventories
 
 The simulator updates:
 
 * origin inventory decreases
 * destination or target inventory increases
 
-#### Step 8: Record Metrics
+#### Step 9: Record Metrics
 
 Relevant system and behavioral metrics are recorded.
 
@@ -626,9 +642,10 @@ Decision logic:
 * scooter assignment remains rule-based (highest battery priority at origin)
 * RL action is binary only: offer incentive (`1`) or no offer (`0`)
 * incentive amount is fixed
-* user decision follows labeled choice with opt-out:
-* if `a_t=1`: choose among `offer`, `base`, `opt_out`
-* if `a_t=0`: choose among `base`, `opt_out`
+* Layer 1: user chooses `ride` vs `opt_out` using configurable mode:
+* `aggregated_prob` (fixed aggregate probability)
+* `realtime_choice` (Sara-consistent utility-based participation probability)
+* Layer 2 (only when `ride=1`): user chooses `accept_offer` vs `reject_offer` if offer exists
 
 Reward intent:
 
@@ -640,10 +657,10 @@ Reward intent:
 
 Decision logic:
 
-* RL action includes both offer decision and battery-level related operational choice
-* the action space is expanded beyond pure binary offer/no-offer
-* the simulator must preserve compatibility with OR output while allowing RL to explore broader execution choices
-* user decision must still include `opt_out` in every feasible choice set
+* RL action may include both offer decision and battery-level related operational choice
+* this scenario may use a broader, joint action space than Scenario 1
+* the simulator must preserve compatibility with OR output while allowing RL exploration beyond pure binary offer/no-offer
+* if Scenario 2 uses a joint one-shot user choice set, it is treated as an extension track and not the baseline Sara-aligned track
 
 Reward intent:
 
@@ -659,17 +676,18 @@ The following three corrections are mandatory for consistency with the current r
 
 ### 21.1 Correct User-Choice Probability Logic (with Opt-Out)
 
-The user choice layer must use full labeled multi-alternative utility evaluation:
+The user-choice logic must be corrected to the two-layer baseline:
 
-* compute `P_offer`, `P_base`, and `P_opt_out` when offer exists
-* compute `P_base` and `P_opt_out` when no offer exists
-* ensure probabilities are normalized over the active choice set
+* Layer 1 computes participation (`ride` vs `opt_out`)
+* Layer 2 computes offer acceptance (`accept_offer` vs `reject_offer`) only if `ride=1`
+* `opt_out` must not be part of Layer 2 choice
 
 Implementation requirement:
 
-* final decision must be generated from configured mode (`deterministic` or `stochastic`)
-* two-alternative acceptance-only logic is insufficient for final aligned implementation
-* utility terms common across alternatives may cancel mathematically; this is acceptable only if the retained specification remains behaviorally meaningful
+* Layer 1 uses stochastic realization (Bernoulli(P(ride)))
+* Layer 2 may use configured mode (deterministic or stochastic)
+* Scenario 1 must keep scooter assignment as highest-battery-first system rule
+* the `aggregated_prob` participation mode must be available as baseline Sara-aligned mode
 
 ### 21.2 Fixed Incentive Amount
 
@@ -767,3 +785,25 @@ The upgraded module is accepted only if:
 ## 23. One-Sentence Summary
 
 This project builds a modular, extensible, event-driven shared e-scooter simulation environment that models trip demand, battery dynamics, and user behavior, while interfacing with upstream OR relocation recommendations and supporting future RL-based real-time decision making.
+
+---
+
+## 24. Current Code Baseline (Synced to Repository)
+
+Current repository structure:
+
+* `main.py` and `config.py`: simulation entry and global configuration
+* `simulation/`: environment dynamics (`spatial_system`, `fleet_manager`, `battery_transition`, `trip_generator`, `simulation_engine`, `metrics_logger`, `user_choice_model`, `sara_environment`)
+* `or_model/`: OR input schema, loaders, adapter, and synthetic OR output generator
+* `docs/`: project requirement document
+* `data/input/`: active simulation input files (currently `u_odit.csv`)
+* `data/generated/`: generated OR artifacts and temporary converted files
+* `results/`: simulation and OR run outputs
+* `sara_repo/`: external reference implementation and raw Sara datasets
+
+Path conventions currently used in code:
+
+* `SARA_DATA_DIR = "sara_repo/data"`
+* `BATTERY_TRANSITION_CSV = "sara_repo/data/30sep-df_battery_decline_probs.csv"`
+* `OR_INPUT_PATH = "data/input/u_odit.csv"`
+* Sara-output conversion target: `data/generated/u_odit_from_sara.csv`

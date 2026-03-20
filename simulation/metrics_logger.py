@@ -48,6 +48,7 @@ class MetricsLogger:
         self.trip_records: List[TripRecord] = []
         self.inventory_snapshots: List[Dict[int, Tuple[int, int, int]]] = []
         self.snapshot_times: List[float] = []
+        self.or_injection_metrics: Dict[str, int] = {}
 
     # ── Recording ─────────────────────────────────────────────────────────────
 
@@ -65,6 +66,9 @@ class MetricsLogger:
         """
         self.snapshot_times.append(time)
         self.inventory_snapshots.append(dict(zone_state))
+
+    def set_or_injection_metrics(self, metrics: Dict[str, int]) -> None:
+        self.or_injection_metrics = dict(metrics)
 
     # ── Summary ───────────────────────────────────────────────────────────────
 
@@ -130,6 +134,14 @@ class MetricsLogger:
             "avg_inventory_low":      avg_low,
             "avg_inventory_high":     avg_high,
             "num_snapshots":          len(self.snapshot_times),
+            # OR injection metrics
+            "or_rows_loaded": int(self.or_injection_metrics.get("or_rows_loaded", 0)),
+            "or_rows_active_in_horizon": int(self.or_injection_metrics.get("or_rows_active_in_horizon", 0)),
+            "or_offer_attempts": int(self.or_injection_metrics.get("or_offer_attempts", 0)),
+            "or_offer_blocked_by_quota": int(self.or_injection_metrics.get("or_offer_blocked_by_quota", 0)),
+            "or_quota_consumed": int(self.or_injection_metrics.get("or_quota_consumed", 0)),
+            "or_quota_remaining_end": int(self.or_injection_metrics.get("or_quota_remaining_end", 0)),
+            "or_incentive_overridden_count": int(self.or_injection_metrics.get("or_incentive_overridden_count", 0)),
         }
 
     def _avg_battery_composition(self) -> Tuple[float, float, float]:
@@ -196,4 +208,14 @@ class MetricsLogger:
         print(f"  {'Avg low inventory / snap':<32}  {s['avg_inventory_low']:>10.1f}")
         print(f"  {'Avg high inventory / snap':<32}  {s['avg_inventory_high']:>10.1f}")
         print(f"  {'Inventory snapshots recorded':<32}  {s['num_snapshots']:>10,}")
+        print(SEP2)
+
+        # ── OR injection metrics ───────────────────────────────────────────
+        print(f"  {'OR rows loaded':<32}  {s['or_rows_loaded']:>10,}")
+        print(f"  {'OR rows active in horizon':<32}  {s['or_rows_active_in_horizon']:>10,}")
+        print(f"  {'OR offer attempts':<32}  {s['or_offer_attempts']:>10,}")
+        print(f"  {'OR blocked by quota':<32}  {s['or_offer_blocked_by_quota']:>10,}")
+        print(f"  {'OR quota consumed':<32}  {s['or_quota_consumed']:>10,}")
+        print(f"  {'OR quota remaining end':<32}  {s['or_quota_remaining_end']:>10,}")
+        print(f"  {'OR incentive overridden':<32}  {s['or_incentive_overridden_count']:>10,}")
         print(SEP)

@@ -12,26 +12,42 @@ import os
 import random
 
 from config import (
+    OR_FIXED_INCENTIVE_EUR,
+    OR_FORCE_FIXED_INCENTIVE,
+    OR_INPUT_FORMAT,
+    OR_INPUT_PATH,
+    OR_QUOTA_CONSUME_POLICY,
+    OR_SLOT_MINUTES,
+    OR_VALIDATION_MODE,
     PLANNING_PERIOD,
     RANDOM_SEED,
+    SARA_DATA_DIR,
+    SARA_INIT_INVENTORY_CSV,
+    SARA_INIT_UNIFORM_H,
+    SARA_INIT_UNIFORM_L,
+    SARA_INIT_UNIFORM_N,
+    SARA_IS_WEEKEND,
+    SARA_SLOT0_HOUR,
+    SARA_ZONE_CAPACITY,
+    WALKING_THRESHOLD,
     ROLLING_HORIZON,
     LOOKAHEAD_HORIZON,
     SIM_DURATION,
-    NUM_ZONES,
-    FLEET_SIZE,
-    TRIP_ARRIVAL_RATE,
 )
-from simulation.spatial_system import SpatialSystem
 from simulation.fleet_manager import FleetManager
 from simulation.trip_generator import (
     HeterogeneousTripGenerator,
-    build_synthetic_demand_profile,
+)
+from simulation.sara_environment import (
+    build_sara_demand_profile,
+    build_sara_spatial_system,
+    build_uniform_zone_state,
+    load_zone_state_from_csv,
 )
 from simulation.user_choice_model import UserChoiceModel
 from or_model.or_interface import ORInterface, build_demand_informed_table
+from or_model.sara_adapter import convert_sara_output_to_uodit
 
-# OR data file produced by: python -m or_model.generate_or_output
-OR_DATA_FILE = "data/or_output.csv"
 from simulation.metrics_logger import MetricsLogger
 from simulation.simulation_engine import SimulationEngine
 
@@ -43,22 +59,40 @@ def build_simulation(seed: int = RANDOM_SEED, verbose: bool = True) -> Simulatio
     """
     rng = random.Random(seed)
 
-    # 1. Spatial system — synthetic 10-zone grid
-    spatial = SpatialSystem.create_grid(num_zones=NUM_ZONES)
+    # 1. Spatial system — Sara-aligned H3 stations (IDs 1..N)
+    spatial = build_sara_spatial_system(
+        data_dir=SARA_DATA_DIR,
+        zone_capacity=SARA_ZONE_CAPACITY,
+        walking_threshold=WALKING_THRESHOLD,
+    )
 
-    # 2. Fleet — scooters distributed across zones with random battery levels
+    # 2. Fleet — Sara-aligned initial zone state
     fleet = FleetManager(spatial, rng=rng)
-    fleet.initialize_fleet(fleet_size=FLEET_SIZE, rng=rng)
+    zone_ids = spatial.all_zone_ids()
+    default_state = (SARA_INIT_UNIFORM_N, SARA_INIT_UNIFORM_L, SARA_INIT_UNIFORM_H)
+    if SARA_INIT_INVENTORY_CSV and os.path.isfile(SARA_INIT_INVENTORY_CSV):
+        zone_state = load_zone_state_from_csv(
+            csv_path=SARA_INIT_INVENTORY_CSV,
+            zone_ids=zone_ids,
+            default_state=default_state,
+        )
+    else:
+        zone_state = build_uniform_zone_state(
+            zone_ids=zone_ids,
+            n_count=SARA_INIT_UNIFORM_N,
+            l_count=SARA_INIT_UNIFORM_L,
+            h_count=SARA_INIT_UNIFORM_H,
+        )
+    fleet.initialize_fleet_from_zone_state(zone_state)
 
-    # 3. Demand profile — zone-time heterogeneous (generator / neutral / attractor zones)
-    #    To use real historical data: replace build_synthetic_demand_profile() with
-    #    a loader that reads per-zone per-slot rates from a CSV or JSON file.
-    demand_profile = build_synthetic_demand_profile(
-        zone_ids=spatial.all_zone_ids(),
+    # 3. Demand profile — Sara pickup + omega data
+    demand_profile = build_sara_demand_profile(
+        data_dir=SARA_DATA_DIR,
+        zone_ids=zone_ids,
         sim_duration=SIM_DURATION,
         planning_period=PLANNING_PERIOD,
-        total_rate=TRIP_ARRIVAL_RATE,
-        rng=rng,
+        is_weekend=SARA_IS_WEEKEND,
+        slot0_hour=SARA_SLOT0_HOUR,
     )
 
     # 4. Trip generator (piece-wise Poisson, one Poisson rate per zone per slot)
@@ -72,11 +106,54 @@ def build_simulation(seed: int = RANDOM_SEED, verbose: bool = True) -> Simulatio
     user_model = UserChoiceModel(rng=rng)
 
     # 6. OR interface
-    #    If data/or_output.csv exists (run `python -m or_model.generate_or_output` first),
-    #    load it directly.  Otherwise fall back to the demand-informed synthetic table.
-    if os.path.isfile(OR_DATA_FILE):
-        or_interface = ORInterface.load_from_csv(OR_DATA_FILE, planning_interval=PLANNING_PERIOD)
-        or_source = f"loaded from {OR_DATA_FILE}"
+    #    Preferred path: load standard U_odit from configured file.
+    #    If configured source is Sara-native output, auto-translate once to U_odit.
+    max_time_slot = int(SIM_DURATION // PLANNING_PERIOD)
+    zone_id_set = set(spatial.all_zone_ids())
+
+    if os.path.isfile(OR_INPUT_PATH):
+        try:
+            if OR_INPUT_FORMAT.lower() == "json":
+                or_interface = ORInterface.load_from_json(
+                    OR_INPUT_PATH,
+                    planning_interval=PLANNING_PERIOD,
+                    quota_consume_policy=OR_QUOTA_CONSUME_POLICY,
+                    force_fixed_incentive=OR_FORCE_FIXED_INCENTIVE,
+                    fixed_incentive_eur=OR_FIXED_INCENTIVE_EUR,
+                    validation_mode=OR_VALIDATION_MODE,
+                    valid_zone_ids=zone_id_set,
+                    max_time_slot=max_time_slot,
+                )
+            else:
+                or_interface = ORInterface.load_from_csv(
+                    OR_INPUT_PATH,
+                    planning_interval=PLANNING_PERIOD,
+                    quota_consume_policy=OR_QUOTA_CONSUME_POLICY,
+                    force_fixed_incentive=OR_FORCE_FIXED_INCENTIVE,
+                    fixed_incentive_eur=OR_FIXED_INCENTIVE_EUR,
+                    validation_mode=OR_VALIDATION_MODE,
+                    valid_zone_ids=zone_id_set,
+                    max_time_slot=max_time_slot,
+                )
+            or_source = f"loaded from configured U_odit: {OR_INPUT_PATH}"
+        except Exception:
+            translated_path = "data/generated/u_odit_from_sara.csv"
+            convert_sara_output_to_uodit(
+                input_path=OR_INPUT_PATH,
+                output_path=translated_path,
+                slot_minutes=OR_SLOT_MINUTES,
+            )
+            or_interface = ORInterface.load_from_csv(
+                translated_path,
+                planning_interval=PLANNING_PERIOD,
+                quota_consume_policy=OR_QUOTA_CONSUME_POLICY,
+                force_fixed_incentive=OR_FORCE_FIXED_INCENTIVE,
+                fixed_incentive_eur=OR_FIXED_INCENTIVE_EUR,
+                validation_mode=OR_VALIDATION_MODE,
+                valid_zone_ids=zone_id_set,
+                max_time_slot=max_time_slot,
+            )
+            or_source = f"translated Sara output -> {translated_path}"
     else:
         u_odit_table = build_demand_informed_table(
             demand_profile=demand_profile,
@@ -85,7 +162,11 @@ def build_simulation(seed: int = RANDOM_SEED, verbose: bool = True) -> Simulatio
             planning_period=PLANNING_PERIOD,
             rng=rng,
         )
-        or_interface = ORInterface(u_odit_table, planning_interval=PLANNING_PERIOD)
+        or_interface = ORInterface(
+            u_odit_table,
+            planning_interval=PLANNING_PERIOD,
+            quota_consume_policy=OR_QUOTA_CONSUME_POLICY,
+        )
         or_source = "generated (synthetic placeholder)"
 
     # 7. Metrics logger
@@ -111,8 +192,8 @@ def main() -> None:
     print(SEP)
     print(f"  Seed             : {RANDOM_SEED}")
     print(f"  Duration         : {SIM_DURATION:.0f} min")
-    print(f"  Zones            : {NUM_ZONES}")
-    print(f"  Fleet            : {FLEET_SIZE} scooters")
+    print(f"  Env mode         : sara_aligned")
+    print(f"  Sara data dir    : {SARA_DATA_DIR}")
     print(f"  Planning period  : {PLANNING_PERIOD:.0f} min / period")
     print(
         f"  Rolling horizon  : {ROLLING_HORIZON:.0f} min  "
@@ -130,8 +211,7 @@ def main() -> None:
         f"  U_odit table loaded  ({len(engine.or_interface)} entries  "
         f"across {total_periods} planning periods)"
     )
-    print("  Demand profile: zone-time heterogeneous  "
-          f"(generator / neutral / attractor zones)")
+    print("  Demand profile: Sara data-driven (pickup + omega)")
     print("  Starting event loop ...\n")
 
     logger = engine.run(sim_duration=SIM_DURATION)
