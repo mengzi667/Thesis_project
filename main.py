@@ -12,6 +12,12 @@ import os
 import random
 
 from config import (
+    TRIP_SOURCE,
+    TRIP_REPLAY_PATH,
+    TRIP_REPLAY_SHEET,
+    TRIP_REPLAY_SLOT_MINUTES,
+    TRIP_REPLAY_TIME_OFFSET_MIN,
+    TRIP_ARRIVAL_RATE,
     OR_FIXED_INCENTIVE_EUR,
     OR_FORCE_FIXED_INCENTIVE,
     OR_INPUT_FORMAT,
@@ -36,10 +42,15 @@ from config import (
 )
 from simulation.fleet_manager import FleetManager
 from simulation.trip_generator import (
+    PoissonTripGenerator,
     HeterogeneousTripGenerator,
+    OmegaODTripGenerator,
+    ReplayTripGenerator,
 )
 from simulation.sara_environment import (
     build_sara_demand_profile,
+    build_sara_minute_rt_matrix,
+    build_sara_omega_slot_expected,
     build_sara_spatial_system,
     build_uniform_zone_state,
     load_zone_state_from_csv,
@@ -94,13 +105,45 @@ def build_simulation(seed: int = RANDOM_SEED, verbose: bool = True) -> Simulatio
         is_weekend=SARA_IS_WEEKEND,
         slot0_hour=SARA_SLOT0_HOUR,
     )
+    minute_rt_matrix = build_sara_minute_rt_matrix(SARA_DATA_DIR)
 
-    # 4. Trip generator (piece-wise Poisson, one Poisson rate per zone per slot)
-    trip_gen = HeterogeneousTripGenerator(
-        zone_ids=spatial.all_zone_ids(),
-        demand_profile=demand_profile,
-        rng=rng,
-    )
+    # 4. Trip generator (switchable source)
+    source = TRIP_SOURCE.strip().lower()
+    if source == "replay":
+        trip_gen = ReplayTripGenerator(
+            replay_path=TRIP_REPLAY_PATH,
+            sim_duration=SIM_DURATION,
+            rng=rng,
+            sheet_name=TRIP_REPLAY_SHEET,
+            slot_minutes=TRIP_REPLAY_SLOT_MINUTES,
+            time_offset_min=TRIP_REPLAY_TIME_OFFSET_MIN,
+        )
+    elif source in {"omega", "omega_od"}:
+        od_slot_expected = build_sara_omega_slot_expected(
+            data_dir=SARA_DATA_DIR,
+            zone_ids=zone_ids,
+            sim_duration=SIM_DURATION,
+            planning_period=PLANNING_PERIOD,
+            is_weekend=SARA_IS_WEEKEND,
+            slot0_hour=SARA_SLOT0_HOUR,
+        )
+        trip_gen = OmegaODTripGenerator(
+            od_slot_expected=od_slot_expected,
+            planning_period=PLANNING_PERIOD,
+            rng=rng,
+        )
+    elif source == "poisson":
+        trip_gen = PoissonTripGenerator(
+            zone_ids=spatial.all_zone_ids(),
+            arrival_rate=TRIP_ARRIVAL_RATE,
+            rng=rng,
+        )
+    else:
+        trip_gen = HeterogeneousTripGenerator(
+            zone_ids=spatial.all_zone_ids(),
+            demand_profile=demand_profile,
+            rng=rng,
+        )
 
     # 5. User choice model
     user_model = UserChoiceModel(rng=rng)
@@ -180,6 +223,7 @@ def build_simulation(seed: int = RANDOM_SEED, verbose: bool = True) -> Simulatio
         user_model=user_model,
         or_interface=or_interface,
         logger=logger,
+        ride_time_minutes=minute_rt_matrix,
         verbose=verbose,
     )
 
@@ -193,6 +237,7 @@ def main() -> None:
     print(f"  Seed             : {RANDOM_SEED}")
     print(f"  Duration         : {SIM_DURATION:.0f} min")
     print(f"  Env mode         : sara_aligned")
+    print(f"  Trip source      : {TRIP_SOURCE}")
     print(f"  Sara data dir    : {SARA_DATA_DIR}")
     print(f"  Planning period  : {PLANNING_PERIOD:.0f} min / period")
     print(

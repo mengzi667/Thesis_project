@@ -120,6 +120,50 @@ def build_sara_demand_profile(
     )
 
 
+def build_sara_omega_slot_expected(
+    data_dir: str,
+    zone_ids: List[int],
+    sim_duration: float,
+    planning_period: float,
+    is_weekend: int,
+    slot0_hour: int,
+) -> Dict[Tuple[int, int], Dict[int, float]]:
+    """
+    Build OD-slot expected request counts directly from Sara omega_h.
+
+    Output:
+      od_slot_expected[(o, d)][slot] = expected number of trips in that slot.
+    """
+    num_slots = max(1, int(sim_duration // planning_period) + 1)
+    slots_per_hour = max(1, int(round(60.0 / float(planning_period))))
+    zone_set = set(zone_ids)
+
+    omega = pd.read_csv(_path(data_dir, "30sep-omega_h.csv"))
+    for c in list(omega.columns):
+        if str(c).startswith("Unnamed:"):
+            omega = omega.drop(columns=[c])
+    omega = omega[omega["is_weekend"].astype(int) == int(is_weekend)]
+
+    od_hour_omega: Dict[Tuple[int, int, int], float] = {}
+    for _, row in omega.iterrows():
+        o = int(row["start_station"])
+        d = int(row["end_station"])
+        h = int(row["hour"])
+        if o in zone_set and d in zone_set:
+            od_hour_omega[(o, d, h)] = max(0.0, float(row["omega"]))
+
+    out: Dict[Tuple[int, int], Dict[int, float]] = {}
+    for o in zone_ids:
+        for d in zone_ids:
+            slot_map: Dict[int, float] = {}
+            for slot in range(num_slots):
+                hour = int((slot0_hour + int((slot * planning_period) // 60)) % 24)
+                # omega is hourly expectation -> convert to slot expectation
+                slot_map[slot] = od_hour_omega.get((o, d, hour), 0.0) / float(slots_per_hour)
+            out[(o, d)] = slot_map
+    return out
+
+
 def build_uniform_zone_state(
     zone_ids: List[int],
     n_count: int,
@@ -149,4 +193,56 @@ def load_zone_state_from_csv(
         if z not in zone_set:
             continue
         out[z] = (int(row["n"]), int(row["l"]), int(row["h"]))
+    return out
+
+
+def _haversine_km(
+    lat1_deg: float,
+    lon1_deg: float,
+    lat2_deg: float,
+    lon2_deg: float,
+) -> float:
+    """
+    Great-circle distance in km, aligned to Sara's loader Earth radius.
+    """
+    r = 6367.0
+    lat1 = math.radians(float(lat1_deg))
+    lon1 = math.radians(float(lon1_deg))
+    lat2 = math.radians(float(lat2_deg))
+    lon2 = math.radians(float(lon2_deg))
+    dlat = lat2 - lat1
+    dlon = lon2 - lon1
+    a = (
+        math.sin(dlat / 2.0) ** 2
+        + math.cos(lat1) * math.cos(lat2) * math.sin(dlon / 2.0) ** 2
+    )
+    return r * 2.0 * math.asin(math.sqrt(max(0.0, a)))
+
+
+def build_sara_minute_rt_matrix(data_dir: str) -> Dict[int, Dict[int, float]]:
+    """
+    Build Sara-compatible minute_RT_ij from station H3 centroids.
+
+    This mirrors sara_repo/data_loader.py::_build_walk_and_ride_times:
+      minute_RT_ij[i][j] = 1 if i==j else round((d_km(i,j)/5)*60, 2)
+    """
+    station_map = pd.read_csv(_path(data_dir, "h3_station_map.csv"))
+    if "h3_index" not in station_map.columns:
+        raise ValueError("h3_station_map.csv must contain column 'h3_index'")
+
+    # Zone IDs in this project follow row order: 1..N.
+    latlon: List[Tuple[float, float]] = [h3.h3_to_geo(h) for h in station_map["h3_index"]]
+    n = len(latlon)
+    out: Dict[int, Dict[int, float]] = {}
+    for i in range(1, n + 1):
+        lat_i, lon_i = latlon[i - 1]
+        row: Dict[int, float] = {}
+        for j in range(1, n + 1):
+            if i == j:
+                row[j] = 1.0
+                continue
+            lat_j, lon_j = latlon[j - 1]
+            d_km = _haversine_km(lat_i, lon_i, lat_j, lon_j)
+            row[j] = round((d_km / 5.0) * 60.0, 2)
+        out[i] = row
     return out

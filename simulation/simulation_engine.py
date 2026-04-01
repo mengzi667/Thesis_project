@@ -18,12 +18,17 @@
 
 from __future__ import annotations
 
-from typing import List, Optional
+from typing import Dict, List, Optional
 
-from config import SIM_DURATION, SNAPSHOT_INTERVAL
+from config import (
+    SARA_RIDE_SPEED_KMH,
+    SARA_WALK_SPEED_KMH,
+    SIM_DURATION,
+    SNAPSHOT_INTERVAL,
+)
 from simulation.spatial_system import SpatialSystem
 from simulation.fleet_manager import FleetManager, Scooter
-from simulation.trip_generator import TripRequest, PoissonTripGenerator
+from simulation.trip_generator import TripRequest, TripGenerator
 from simulation.user_choice_model import UserChoiceModel
 from or_model.or_interface import ORInterface, RelocationOpportunity
 from simulation.metrics_logger import MetricsLogger, TripRecord, UNSERVED_NO_SUPPLY, UNSERVED_OPT_OUT
@@ -47,10 +52,11 @@ class SimulationEngine:
         self,
         spatial: SpatialSystem,
         fleet: FleetManager,
-        trip_gen: PoissonTripGenerator,
+        trip_gen: TripGenerator,
         user_model: UserChoiceModel,
         or_interface: ORInterface,
         logger: MetricsLogger,
+        ride_time_minutes: Optional[Dict[int, Dict[int, float]]] = None,
         snapshot_interval: float = SNAPSHOT_INTERVAL,
         verbose: bool = False,
     ) -> None:
@@ -60,6 +66,7 @@ class SimulationEngine:
         self.user_model = user_model
         self.or_interface = or_interface
         self.logger = logger
+        self.ride_time_minutes = ride_time_minutes or {}
         self.snapshot_interval = snapshot_interval
         self.verbose = verbose
         self._current_time: float = 0.0
@@ -197,12 +204,21 @@ class SimulationEngine:
 
         # ── Step 5: Layer-2 acceptance (conditional on participation) ───────
         if reloc_opp is not None:
+            walk_offer_min = self._meters_to_minutes(extra_walk, SARA_WALK_SPEED_KMH)
+            walk_base_min = 0.0
+            rt_base_min = self._ride_minutes_between(
+                trip.origin_zone, trip.destination_zone, SARA_RIDE_SPEED_KMH
+            )
+            rt_offer_min = self._ride_minutes_between(
+                trip.origin_zone, reloc_opp.recommended_dest, SARA_RIDE_SPEED_KMH
+            )
             relocation_accepted = self.user_model.decide_offer_acceptance(
                 has_offer=True,
                 incentive_amount=reloc_opp.incentive_amount,
-                walk_offer=extra_walk,
-                walk_base=0.0,
-                trip_duration=trip.trip_duration,
+                walk_offer_min=walk_offer_min,
+                walk_base_min=walk_base_min,
+                rt_offer_min=rt_offer_min,
+                rt_base_min=rt_base_min,
                 battery_offer=0.0,
                 battery_base=0.0,
                 user_type=trip.user_type,
@@ -382,3 +398,28 @@ class SimulationEngine:
         if not available:
             return None
         return available[0]   # highest-battery scooter, strict priority (PRD §14)
+
+    # ── Acceptance utility helpers ──────────────────────────────────────────
+
+    def _meters_to_minutes(self, distance_m: float, speed_kmh: float) -> float:
+        """Convert meter-scale distance to minutes under constant speed."""
+        if speed_kmh <= 0:
+            return 0.0
+        speed_m_per_min = (speed_kmh * 1000.0) / 60.0
+        if speed_m_per_min <= 0:
+            return 0.0
+        return max(0.0, float(distance_m)) / speed_m_per_min
+
+    def _ride_minutes_between(self, zone_a: int, zone_b: int, speed_kmh: float) -> float:
+        """
+        Ride-time input for acceptance model.
+        Priority:
+          1) Sara minute_RT_ij matrix (if provided)
+          2) Fallback distance/speed conversion
+        """
+        if self.ride_time_minutes:
+            row = self.ride_time_minutes.get(int(zone_a))
+            if row is not None and int(zone_b) in row:
+                return max(0.0, float(row[int(zone_b)]))
+        distance_m = self.spatial.distance_between(zone_a, zone_b)
+        return self._meters_to_minutes(distance_m, speed_kmh)

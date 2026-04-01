@@ -35,6 +35,7 @@ from config import (
     SARA_FIRST_LAYER_WALK_MIN,
     SARA_FIRST_LAYER_PCT_HIGH,
     SARA_FIRST_LAYER_PCT_LOW,
+    SARA_RIDE_PRICE_PER_MIN,
     SARA_PROB_OUT,
     SARA_RANGE_PER_PCT_KM,
     SARA_USER_ATTITUDE,
@@ -113,14 +114,20 @@ class UserChoiceModel:
         )
 
     def _offer_common_utility(
-        self, walk_offer: float, trip_duration: float, incentive_amount: float
+        self,
+        walk_offer_min: float,
+        rt_offer_min: float,
+        incentive_amount: float,
     ) -> float:
-        ride_fee_base = 0.30 * max(0.0, trip_duration)
-        ride_fee_offer = max(0.0, ride_fee_base - max(0.0, incentive_amount))
+        # Offer-side monetary term without floor clipping to match
+        # direct utility comparison style in Sara's accept-parameter build.
+        ride_fee_offer = (
+            SARA_RIDE_PRICE_PER_MIN * max(0.0, rt_offer_min) - max(0.0, incentive_amount)
+        )
         asc_share = 0.5 * SARA_BETA_ES
         return (
             asc_share
-            + SARA_BETA_WALK * max(0.0, walk_offer)
+            + SARA_BETA_WALK * max(0.0, walk_offer_min)
             + SARA_BETA_UNLOCK * 1.0
             + SARA_BETA_RIDE * ride_fee_offer
             + SARA_BETA_TYPE * SARA_USER_VEHICLE_TYPE_25
@@ -198,9 +205,10 @@ class UserChoiceModel:
         self,
         has_offer: bool,
         incentive_amount: float = RELOCATION_INCENTIVE,
-        walk_offer: float = 0.0,
-        walk_base: float = 0.0,
-        trip_duration: float = 0.0,
+        walk_offer_min: float = 0.0,
+        walk_base_min: float = 0.0,
+        rt_offer_min: float = 0.0,
+        rt_base_min: float = 0.0,
         battery_offer: float = 0.0,
         battery_base: float = 0.0,
         user_type: str = "normal",
@@ -214,13 +222,13 @@ class UserChoiceModel:
             return {"offer": 0.0, "base": 1.0}
 
         v_offer = self._offer_common_utility(
-            walk_offer=walk_offer,
-            trip_duration=trip_duration,
+            walk_offer_min=walk_offer_min,
+            rt_offer_min=rt_offer_min,
             incentive_amount=incentive_amount,
         ) + SARA_BETA_BATT * (SARA_RANGE_PER_PCT_KM * max(0.0, battery_offer))
         v_base = self._base_common_utility(
-            walk_base=walk_base,
-            ride_fee_term=0.30 * max(0.0, trip_duration),
+            walk_base=walk_base_min,
+            ride_fee_term=SARA_RIDE_PRICE_PER_MIN * max(0.0, rt_base_min),
         ) + SARA_BETA_BATT * (SARA_RANGE_PER_PCT_KM * max(0.0, battery_base))
 
         p_offer, p_base = _softmax([v_offer, v_base])
@@ -230,9 +238,10 @@ class UserChoiceModel:
         self,
         has_offer: bool,
         incentive_amount: float = RELOCATION_INCENTIVE,
-        walk_offer: float = 0.0,
-        walk_base: float = 0.0,
-        trip_duration: float = 0.0,
+        walk_offer_min: float = 0.0,
+        walk_base_min: float = 0.0,
+        rt_offer_min: float = 0.0,
+        rt_base_min: float = 0.0,
         battery_offer: float = 0.0,
         battery_base: float = 0.0,
         user_type: str = "normal",
@@ -241,9 +250,10 @@ class UserChoiceModel:
         probs = self.acceptance_probabilities(
             has_offer=has_offer,
             incentive_amount=incentive_amount,
-            walk_offer=walk_offer,
-            walk_base=walk_base,
-            trip_duration=trip_duration,
+            walk_offer_min=walk_offer_min,
+            walk_base_min=walk_base_min,
+            rt_offer_min=rt_offer_min,
+            rt_base_min=rt_base_min,
             battery_offer=battery_offer,
             battery_base=battery_base,
             user_type=user_type,
@@ -260,13 +270,14 @@ class UserChoiceModel:
         self,
         has_offer: bool,
         incentive_amount: float = RELOCATION_INCENTIVE,
-        walk_offer: float = 0.0,
-        walk_base: float = 0.0,
+        walk_offer_min: float = 0.0,
+        walk_base_min: float = 0.0,
         rho0_offer: float = 0.0,
         rho0_base: float = 0.0,
         rho1_offer: float = 0.0,
         rho1_base: float = 0.0,
-        trip_duration: float = 0.0,
+        rt_offer_min: float = 0.0,
+        rt_base_min: float = 0.0,
         battery_offer: float = 0.0,
         battery_base: float = 0.0,
         user_type: str = "normal",
@@ -276,8 +287,8 @@ class UserChoiceModel:
         """
         _ = (rho0_offer, rho0_base, rho1_offer, rho1_base)
         ride = self.decide_participation(
-            walk_base=walk_base,
-            trip_duration=trip_duration,
+            walk_base=walk_base_min,
+            trip_duration=rt_base_min,
             battery_high=battery_base,
             battery_low=battery_base,
             user_type=user_type,
@@ -287,9 +298,10 @@ class UserChoiceModel:
         accepted = self.decide_offer_acceptance(
             has_offer=has_offer,
             incentive_amount=incentive_amount,
-            walk_offer=walk_offer,
-            walk_base=walk_base,
-            trip_duration=trip_duration,
+            walk_offer_min=walk_offer_min,
+            walk_base_min=walk_base_min,
+            rt_offer_min=rt_offer_min,
+            rt_base_min=rt_base_min,
             battery_offer=battery_offer,
             battery_base=battery_base,
             user_type=user_type,
@@ -299,13 +311,14 @@ class UserChoiceModel:
     def accept_relocation(
         self,
         incentive_amount: float = RELOCATION_INCENTIVE,
-        walk_offer: float = 0.0,
-        walk_base: float = 0.0,
+        walk_offer_min: float = 0.0,
+        walk_base_min: float = 0.0,
         rho0_offer: float = 0.0,
         rho0_base: float = 0.0,
         rho1_offer: float = 0.0,
         rho1_base: float = 0.0,
-        trip_duration: float = 0.0,
+        rt_offer_min: float = 0.0,
+        rt_base_min: float = 0.0,
         battery_offer: float = 0.0,
         battery_base: float = 0.0,
         user_type: str = "normal",
@@ -315,9 +328,10 @@ class UserChoiceModel:
         return self.decide_offer_acceptance(
             has_offer=True,
             incentive_amount=incentive_amount,
-            walk_offer=walk_offer,
-            walk_base=walk_base,
-            trip_duration=trip_duration,
+            walk_offer_min=walk_offer_min,
+            walk_base_min=walk_base_min,
+            rt_offer_min=rt_offer_min,
+            rt_base_min=rt_base_min,
             battery_offer=battery_offer,
             battery_base=battery_base,
             user_type=user_type,

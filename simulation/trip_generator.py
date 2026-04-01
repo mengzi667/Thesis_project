@@ -6,9 +6,13 @@
 
 from __future__ import annotations
 
+import os
 import random
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple, Union
+
+import numpy as np
+import pandas as pd
 
 from config import (
     PLANNING_PERIOD,
@@ -248,8 +252,202 @@ class HeterogeneousTripGenerator:
         )
 
 
+class OmegaODTripGenerator:
+    """
+    Generate trip requests directly from OD-slot expected flows (omega-based).
+
+    od_slot_expected[(o, d)][slot] stores expected trips in that slot.
+    For each (o, d, slot), requests are sampled as Poisson(expected).
+    """
+
+    def __init__(
+        self,
+        od_slot_expected: Dict[Tuple[int, int], Dict[int, float]],
+        planning_period: float = PLANNING_PERIOD,
+        rng: Optional[random.Random] = None,
+    ) -> None:
+        self.od_slot_expected = od_slot_expected
+        self.planning_period = float(planning_period)
+        self.rng = rng or random.Random()
+        self._np_rng = np.random.default_rng(self.rng.randrange(2**32))
+        self._counter: int = 0
+
+    def generate_trips(self, sim_duration: float) -> List[TripRequest]:
+        trips: List[TripRequest] = []
+        num_slots = max(1, int(sim_duration // self.planning_period) + 1)
+
+        for (o, d), slot_map in self.od_slot_expected.items():
+            for slot in range(num_slots):
+                slot_start = slot * self.planning_period
+                if slot_start >= sim_duration:
+                    continue
+                lam = max(0.0, float(slot_map.get(slot, 0.0)))
+                if lam <= 0.0:
+                    continue
+                n = int(self._np_rng.poisson(lam))
+                for _ in range(n):
+                    t = slot_start + self.rng.uniform(0.0, self.planning_period)
+                    duration = max(1.0, self.rng.gauss(TRIP_DURATION_MEAN, TRIP_DURATION_STD))
+                    distance = max(0.1, self.rng.gauss(TRIP_DISTANCE_MEAN, TRIP_DISTANCE_STD))
+                    user_type = self.rng.choices(USER_TYPES, weights=USER_TYPE_WEIGHTS, k=1)[0]
+                    self._counter += 1
+                    trips.append(
+                        TripRequest(
+                            request_id=self._counter,
+                            origin_zone=int(o),
+                            destination_zone=int(d),
+                            request_time=float(t),
+                            trip_duration=float(duration),
+                            trip_distance=float(distance),
+                            user_type=str(user_type),
+                        )
+                    )
+
+        trips.sort(key=lambda r: r.request_time)
+        return trips
+
+
+class ReplayTripGenerator:
+    """
+    Deterministic trip replay from file (CSV/XLSX).
+
+    Supported input columns (aliases):
+      origin       : origin_zone | origin | start_station | o
+      destination  : destination_zone | destination | end_station | d | original_dest | orig_dest
+      request time : request_time | request_minute | time_min | minute
+                     or slot fields: time_slot | depart_slot | slot | t
+      optional     : trip_duration, trip_distance, user_type
+    """
+
+    def __init__(
+        self,
+        replay_path: str,
+        sim_duration: float,
+        rng: Optional[random.Random] = None,
+        sheet_name: str = "Sheet1",
+        slot_minutes: float = PLANNING_PERIOD,
+        time_offset_min: float = 0.0,
+    ) -> None:
+        if not os.path.isfile(replay_path):
+            raise FileNotFoundError(f"Replay trip file not found: {replay_path}")
+        self.replay_path = replay_path
+        self.sim_duration = float(sim_duration)
+        self.rng = rng or random.Random()
+        self.sheet_name = sheet_name
+        self.slot_minutes = float(slot_minutes)
+        self.time_offset_min = float(time_offset_min)
+        self._counter: int = 0
+
+    def generate_trips(self, sim_duration: float) -> List[TripRequest]:
+        _ = sim_duration
+        rows = self._load_rows()
+        trips: List[TripRequest] = []
+
+        for row in rows:
+            origin = self._to_int(
+                self._pick_first(row, ["origin_zone", "origin", "start_station", "o"])
+            )
+            dest = self._to_int(
+                self._pick_first(
+                    row,
+                    ["destination_zone", "destination", "end_station", "d", "original_dest", "orig_dest"],
+                )
+            )
+            if origin is None or dest is None:
+                continue
+
+            t_req = self._parse_request_time(row)
+            if t_req is None:
+                continue
+            if t_req < 0.0 or t_req > self.sim_duration:
+                continue
+
+            duration = self._to_float(self._pick_first(row, ["trip_duration", "duration_min"]))
+            if duration is None:
+                duration = max(1.0, self.rng.gauss(TRIP_DURATION_MEAN, TRIP_DURATION_STD))
+            duration = max(1.0, float(duration))
+
+            distance = self._to_float(self._pick_first(row, ["trip_distance", "distance_km"]))
+            if distance is None:
+                distance = max(0.1, self.rng.gauss(TRIP_DISTANCE_MEAN, TRIP_DISTANCE_STD))
+            distance = max(0.1, float(distance))
+
+            user_type = self._pick_first(row, ["user_type"], default=None)
+            if user_type is None or str(user_type).strip() == "":
+                user_type = self.rng.choices(USER_TYPES, weights=USER_TYPE_WEIGHTS, k=1)[0]
+            user_type = str(user_type)
+
+            self._counter += 1
+            trips.append(
+                TripRequest(
+                    request_id=self._counter,
+                    origin_zone=int(origin),
+                    destination_zone=int(dest),
+                    request_time=float(t_req),
+                    trip_duration=float(duration),
+                    trip_distance=float(distance),
+                    user_type=user_type,
+                )
+            )
+
+        trips.sort(key=lambda r: r.request_time)
+        return trips
+
+    def _load_rows(self) -> List[dict]:
+        ext = os.path.splitext(self.replay_path)[1].lower()
+        if ext == ".csv":
+            df = pd.read_csv(self.replay_path)
+        elif ext in {".xlsx", ".xls"}:
+            df = pd.read_excel(self.replay_path, sheet_name=self.sheet_name)
+        else:
+            raise ValueError(f"unsupported replay extension: {ext}")
+        return df.to_dict(orient="records")
+
+    def _parse_request_time(self, row: dict) -> Optional[float]:
+        t_min = self._to_float(
+            self._pick_first(row, ["request_time", "request_minute", "time_min", "minute"])
+        )
+        if t_min is not None:
+            return float(t_min) + self.time_offset_min
+
+        slot = self._to_float(self._pick_first(row, ["time_slot", "depart_slot", "slot", "t"]))
+        if slot is not None:
+            return float(slot) * self.slot_minutes + self.time_offset_min
+        return None
+
+    @staticmethod
+    def _pick_first(row: dict, names: List[str], default=None):
+        for n in names:
+            if n in row and row[n] is not None and str(row[n]).strip() != "":
+                return row[n]
+        return default
+
+    @staticmethod
+    def _to_int(x) -> Optional[int]:
+        try:
+            if x is None:
+                return None
+            return int(float(x))
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _to_float(x) -> Optional[float]:
+        try:
+            if x is None:
+                return None
+            return float(x)
+        except (TypeError, ValueError):
+            return None
+
+
 # Shared type alias — both generators satisfy this interface
-TripGenerator = Union[PoissonTripGenerator, HeterogeneousTripGenerator]
+TripGenerator = Union[
+    PoissonTripGenerator,
+    HeterogeneousTripGenerator,
+    OmegaODTripGenerator,
+    ReplayTripGenerator,
+]
 
 
 # ── Synthetic demand profile builder ─────────────────────────────────────────

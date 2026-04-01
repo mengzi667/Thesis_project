@@ -55,6 +55,18 @@ TRIP_DURATION_STD: float = 5.0
 TRIP_DISTANCE_MEAN: float = 2.0      # km
 TRIP_DISTANCE_STD: float = 0.5
 
+# ── Trip source switch ─────────────────────────────────────────────────────────
+#   omega_od     : omega_h OD-slot stochastic generation (recommended for OR/RL)
+#   sara_profile : Sara pickup+omega demand-driven stochastic generation
+#   replay       : deterministic replay from a trip file (recommended for Sara alignment)
+#   poisson      : homogeneous Poisson baseline
+TRIP_SOURCE: str = "omega_od"
+# Replay input file (CSV/XLSX), used only when TRIP_SOURCE == "replay".
+TRIP_REPLAY_PATH: str = "data/input/sara_trip_replay.csv"
+TRIP_REPLAY_SHEET: str = "Sheet1"    # for .xlsx
+TRIP_REPLAY_SLOT_MINUTES: float = 15.0
+TRIP_REPLAY_TIME_OFFSET_MIN: float = 0.0
+
 # ── User types ─────────────────────────────────────────────────────────────────
 USER_TYPES: list = ["price_sensitive", "time_sensitive", "normal"]
 USER_TYPE_WEIGHTS: list = [0.3, 0.3, 0.4]
@@ -92,6 +104,9 @@ SARA_BETA_SHARED: float = -0.86
 SARA_ETA_ATT: float = 0.82
 SARA_ETA_RANGE: float = -0.58
 SARA_RANGE_PER_PCT_KM: float = 0.6
+SARA_WALK_SPEED_KMH: float = 4.8
+SARA_RIDE_SPEED_KMH: float = 25.0
+SARA_RIDE_PRICE_PER_MIN: float = 0.30
 
 # Default labeled-alternative attributes used in simulation.
 SARA_USER_VEHICLE_TYPE_25: int = 1
