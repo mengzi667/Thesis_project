@@ -13,8 +13,14 @@ xlsxwriter>=3.2
 openpyxl>=3.1
 
 # Gurobi Python API is required only for sara_repo optimization runs.
-# Install this only when Gurobi is available/licensed in your environment.
-gurobipy>=11.0
+# # Install this only when Gurobi is available/licensed in your environment.
+# gurobipy>=11.0
 
 # ── Optional development utilities ────────────────────────────────────────────
 pytest>=8.0
+
+# ── RL backend (Scenario 1 DDQN) ─────────────────────────────────────────────
+torch>=2.2
+
+# ── CLI progress bar (RL training) ─────────────────────────────────────────
+tqdm>=4.66

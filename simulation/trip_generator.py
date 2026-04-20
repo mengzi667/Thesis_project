@@ -9,7 +9,7 @@ from __future__ import annotations
 import os
 import random
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Callable, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import pandas as pd
@@ -265,26 +265,50 @@ class OmegaODTripGenerator:
         od_slot_expected: Dict[Tuple[int, int], Dict[int, float]],
         planning_period: float = PLANNING_PERIOD,
         rng: Optional[random.Random] = None,
+        arrival_dist: str = "poisson",
+        phi_mode: str = "global",
+        phi_global: float = 0.8,
+        phi_min: float = 0.05,
+        phi_max: float = 5.0,
+        phi_table: Optional[Dict[Tuple[int, int], float]] = None,
+        slot_to_hour_fn: Optional[Callable[[int], int]] = None,
+        is_weekend: int = 1,
     ) -> None:
         self.od_slot_expected = od_slot_expected
         self.planning_period = float(planning_period)
         self.rng = rng or random.Random()
         self._np_rng = np.random.default_rng(self.rng.randrange(2**32))
         self._counter: int = 0
+        self.arrival_dist = str(arrival_dist).strip().lower()
+        self.phi_mode = str(phi_mode).strip().lower()
+        self.phi_global = float(phi_global)
+        self.phi_min = float(phi_min)
+        self.phi_max = float(phi_max)
+        self.phi_table = dict(phi_table or {})
+        self.slot_to_hour_fn = slot_to_hour_fn
+        self.is_weekend = int(is_weekend)
+
+        # Diagnostics for runtime reporting.
+        self.last_trip_count: int = 0
+        self.last_count_mean: float = 0.0
+        self.last_count_var: float = 0.0
+        self.last_fano_like: float = 0.0
 
     def generate_trips(self, sim_duration: float) -> List[TripRequest]:
         trips: List[TripRequest] = []
         num_slots = max(1, int(sim_duration // self.planning_period) + 1)
+        sampled_counts: List[int] = []
 
         for (o, d), slot_map in self.od_slot_expected.items():
             for slot in range(num_slots):
                 slot_start = slot * self.planning_period
                 if slot_start >= sim_duration:
                     continue
-                lam = max(0.0, float(slot_map.get(slot, 0.0)))
-                if lam <= 0.0:
+                mu = max(0.0, float(slot_map.get(slot, 0.0)))
+                if mu <= 0.0:
                     continue
-                n = int(self._np_rng.poisson(lam))
+                n = self._sample_count(mu=mu, slot=int(slot))
+                sampled_counts.append(int(n))
                 for _ in range(n):
                     t = slot_start + self.rng.uniform(0.0, self.planning_period)
                     duration = max(1.0, self.rng.gauss(TRIP_DURATION_MEAN, TRIP_DURATION_STD))
@@ -304,7 +328,66 @@ class OmegaODTripGenerator:
                     )
 
         trips.sort(key=lambda r: r.request_time)
+        self.last_trip_count = len(trips)
+        if sampled_counts:
+            arr = np.asarray(sampled_counts, dtype=np.float64)
+            self.last_count_mean = float(arr.mean())
+            self.last_count_var = float(arr.var(ddof=1)) if len(arr) > 1 else 0.0
+            self.last_fano_like = (
+                float(self.last_count_var / self.last_count_mean)
+                if self.last_count_mean > 1e-12
+                else 0.0
+            )
+        else:
+            self.last_count_mean = 0.0
+            self.last_count_var = 0.0
+            self.last_fano_like = 0.0
         return trips
+
+    def _sample_count(self, mu: float, slot: int) -> int:
+        if mu <= 0.0:
+            return 0
+
+        if self.arrival_dist != "nb2":
+            return int(self._np_rng.poisson(mu))
+
+        phi = self._resolve_phi(slot=slot)
+        if phi <= 1e-8:
+            return int(self._np_rng.poisson(mu))
+
+        # NB2 via Gamma-Poisson mixture:
+        #   lambda_tilde ~ Gamma(k, theta), k=1/phi, theta=mu/k
+        #   N ~ Poisson(lambda_tilde)
+        k = 1.0 / phi
+        theta = mu / k
+        lam_tilde = float(self._np_rng.gamma(shape=k, scale=theta))
+        return int(self._np_rng.poisson(lam_tilde))
+
+    def _resolve_phi(self, slot: int) -> float:
+        def _clip(v: float) -> float:
+            lo = min(self.phi_min, self.phi_max)
+            hi = max(self.phi_min, self.phi_max)
+            return float(min(max(v, lo), hi))
+
+        mode = self.phi_mode
+        if mode == "global":
+            return _clip(float(self.phi_global))
+
+        hour = int(self.slot_to_hour_fn(slot)) if self.slot_to_hour_fn else 0
+        if mode == "by_hour_weektype":
+            key = (int(self.is_weekend), int(hour))
+            return _clip(float(self.phi_table.get(key, self.phi_global)))
+
+        if mode == "by_hour":
+            key = (-1, int(hour))
+            alt = (int(self.is_weekend), int(hour))
+            if key in self.phi_table:
+                return _clip(float(self.phi_table[key]))
+            if alt in self.phi_table:
+                return _clip(float(self.phi_table[alt]))
+            return _clip(float(self.phi_global))
+
+        return _clip(float(self.phi_global))
 
 
 class ReplayTripGenerator:

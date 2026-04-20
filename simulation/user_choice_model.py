@@ -1,11 +1,12 @@
 # user_choice_model.py
-# Two-layer user behavioural model for Scenario 1 (Sara-aligned structure).
+# Single-layer user behavioural model for Scenario 1 (Sara-aligned utility).
 #
-# Layer 1: participation decision (ride vs opt_out)
-# Layer 2: conditional offer acceptance (accept_offer vs reject_offer)
+# Decision set:
+#   - has_offer=True  -> {offer, base, opt_out}
+#   - has_offer=False -> {base, opt_out}
 #
-# Scooter assignment remains a deterministic system rule in SimulationEngine
-# (highest-battery-first) and is intentionally outside this module.
+# Utility is computed in real time and converted via softmax probabilities.
+# Final action is sampled stochastically from that distribution.
 
 from __future__ import annotations
 
@@ -30,14 +31,8 @@ from config import (
     SARA_BETA_WALK,
     SARA_ETA_ATT,
     SARA_ETA_RANGE,
-    SARA_FIRST_LAYER_RIDE_FEE_TERM,
-    SARA_FIRST_LAYER_UNLOCK_FEE,
-    SARA_FIRST_LAYER_WALK_MIN,
-    SARA_FIRST_LAYER_PCT_HIGH,
-    SARA_FIRST_LAYER_PCT_LOW,
-    SARA_RIDE_PRICE_PER_MIN,
-    SARA_PROB_OUT,
     SARA_RANGE_PER_PCT_KM,
+    SARA_RIDE_PRICE_PER_MIN,
     SARA_USER_ATTITUDE,
     SARA_USER_BIKE,
     SARA_USER_INCOME_LOW,
@@ -58,17 +53,10 @@ def _softmax(utilities: List[float]) -> List[float]:
 
 
 class UserChoiceModel:
-    """
-    Two-layer user behaviour model.
+    """Single-layer user behaviour model."""
 
-    Layer 1 (participation):
-      - aggregated_prob: fixed P(opt_out)=SARA_PROB_OUT
-      - realtime_choice: P(ride)=P(high)+P(low) from Sara-style utilities
-
-    Layer 2 (acceptance):
-      - conditional on ride=1
-      - binary choice between offer and base
-    """
+    ACTIONS_WITH_OFFER = ("offer", "base", "opt_out")
+    ACTIONS_NO_OFFER = ("base", "opt_out")
 
     def __init__(
         self,
@@ -77,22 +65,10 @@ class UserChoiceModel:
         acceptance_mode: str = RELOCATION_ACCEPTANCE_MODE,
     ) -> None:
         self.rng = rng or random.Random()
-
-        flm = str(first_layer_mode).strip().lower()
-        if flm not in {"aggregated_prob", "realtime_choice"}:
-            raise ValueError(
-                "first_layer_mode must be 'aggregated_prob' or 'realtime_choice', "
-                f"got: {first_layer_mode!r}"
-            )
-        self.first_layer_mode = flm
-
-        am = str(acceptance_mode).strip().lower()
-        if am not in {"deterministic", "stochastic"}:
-            raise ValueError(
-                "acceptance_mode must be 'deterministic' or 'stochastic', "
-                f"got: {acceptance_mode!r}"
-            )
-        self.acceptance_mode = am
+        # Keep old config knobs for compatibility, but single-layer decision
+        # always uses real-time utility + stochastic sampling.
+        self.first_layer_mode = str(first_layer_mode).strip().lower()
+        self.acceptance_mode = str(acceptance_mode).strip().lower()
 
     # ── Utility primitives ───────────────────────────────────────────────────
 
@@ -101,7 +77,7 @@ class UserChoiceModel:
         return (
             asc_share
             + SARA_BETA_WALK * max(0.0, walk_base)
-            + SARA_BETA_UNLOCK * SARA_FIRST_LAYER_UNLOCK_FEE
+            + SARA_BETA_UNLOCK * 1.0
             + SARA_BETA_RIDE * max(0.0, ride_fee_term)
             + SARA_BETA_TYPE * SARA_USER_VEHICLE_TYPE_25
             + SARA_BETA_PREV * SARA_USER_PREVIOUS_USE
@@ -119,8 +95,8 @@ class UserChoiceModel:
         rt_offer_min: float,
         incentive_amount: float,
     ) -> float:
-        # Offer-side monetary term without floor clipping to match
-        # direct utility comparison style in Sara's accept-parameter build.
+        # No floor-clipping for (ride_price - incentive), consistent with
+        # Sara-style direct utility comparison.
         ride_fee_offer = (
             SARA_RIDE_PRICE_PER_MIN * max(0.0, rt_offer_min) - max(0.0, incentive_amount)
         )
@@ -140,7 +116,75 @@ class UserChoiceModel:
             + SARA_ETA_RANGE * SARA_USER_RANGE_ANXIETY
         )
 
-    # ── Layer 1: participation (ride vs opt_out) ────────────────────────────
+    # ── Single-layer choice ──────────────────────────────────────────────────
+
+    def choice_probabilities(
+        self,
+        has_offer: bool,
+        incentive_amount: float = RELOCATION_INCENTIVE,
+        walk_offer_min: float = 0.0,
+        walk_base_min: float = 0.0,
+        rt_offer_min: float = 0.0,
+        rt_base_min: float = 0.0,
+        battery_offer: float = 0.0,
+        battery_base: float = 0.0,
+        user_type: str = "normal",
+    ) -> Dict[str, float]:
+        """Return action probabilities over {'offer','base','opt_out'}."""
+        _ = user_type
+
+        v_base = self._base_common_utility(
+            walk_base=walk_base_min,
+            ride_fee_term=SARA_RIDE_PRICE_PER_MIN * max(0.0, rt_base_min),
+        ) + SARA_BETA_BATT * (SARA_RANGE_PER_PCT_KM * max(0.0, battery_base))
+        v_out = 0.0
+
+        if has_offer:
+            v_offer = self._offer_common_utility(
+                walk_offer_min=walk_offer_min,
+                rt_offer_min=rt_offer_min,
+                incentive_amount=incentive_amount,
+            ) + SARA_BETA_BATT * (SARA_RANGE_PER_PCT_KM * max(0.0, battery_offer))
+            p_offer, p_base, p_out = _softmax([v_offer, v_base, v_out])
+            return {"offer": p_offer, "base": p_base, "opt_out": p_out}
+
+        p_base, p_out = _softmax([v_base, v_out])
+        return {"offer": 0.0, "base": p_base, "opt_out": p_out}
+
+    def decide_trip_action(
+        self,
+        has_offer: bool,
+        incentive_amount: float = RELOCATION_INCENTIVE,
+        walk_offer_min: float = 0.0,
+        walk_base_min: float = 0.0,
+        rt_offer_min: float = 0.0,
+        rt_base_min: float = 0.0,
+        battery_offer: float = 0.0,
+        battery_base: float = 0.0,
+        user_type: str = "normal",
+    ) -> str:
+        """Sample one action from the single-layer choice distribution."""
+        probs = self.choice_probabilities(
+            has_offer=has_offer,
+            incentive_amount=incentive_amount,
+            walk_offer_min=walk_offer_min,
+            walk_base_min=walk_base_min,
+            rt_offer_min=rt_offer_min,
+            rt_base_min=rt_base_min,
+            battery_offer=battery_offer,
+            battery_base=battery_base,
+            user_type=user_type,
+        )
+        actions = self.ACTIONS_WITH_OFFER if has_offer else self.ACTIONS_NO_OFFER
+        x = self.rng.random()
+        csum = 0.0
+        for a in actions:
+            csum += float(probs[a])
+            if x <= csum:
+                return a
+        return actions[-1]
+
+    # ── Backward-compatible helpers ──────────────────────────────────────────
 
     def participation_probabilities(
         self,
@@ -150,35 +194,16 @@ class UserChoiceModel:
         battery_low: float = 0.0,
         user_type: str = "normal",
     ) -> Dict[str, float]:
-        """
-        Return Layer 1 probabilities: {'ride': ..., 'opt_out': ...}.
-        """
-        _ = user_type
-
-        if self.first_layer_mode == "aggregated_prob":
-            p_opt = min(1.0, max(0.0, float(SARA_PROB_OUT)))
-            return {"ride": 1.0 - p_opt, "opt_out": p_opt}
-
-        # Match Sara compute_probs_for_class defaults:
-        # walk_min=2.0, unlock_fee=1.0, ride_fee_term=0.30.
-        walk_m = float(SARA_FIRST_LAYER_WALK_MIN if walk_base == 0.0 else walk_base)
-        ride_fee_term = float(SARA_FIRST_LAYER_RIDE_FEE_TERM)
-        common = self._base_common_utility(
-            walk_base=walk_m,
-            ride_fee_term=ride_fee_term,
+        """Legacy helper: derive {'ride','opt_out'} from no-offer mode."""
+        _ = battery_high
+        probs = self.choice_probabilities(
+            has_offer=False,
+            walk_base_min=walk_base,
+            rt_base_min=trip_duration,
+            battery_base=battery_low,
+            user_type=user_type,
         )
-        # Strict Sara default input setting for first-layer realtime model.
-        # Keep method arguments for interface compatibility, but do not use
-        # request-specific battery values in this mode.
-        _ = (battery_high, battery_low)
-        pct_high = max(0.0, float(SARA_FIRST_LAYER_PCT_HIGH))
-        pct_low = max(0.0, float(SARA_FIRST_LAYER_PCT_LOW))
-
-        v_high = common + SARA_BETA_BATT * (SARA_RANGE_PER_PCT_KM * pct_high)
-        v_low = common + SARA_BETA_BATT * (SARA_RANGE_PER_PCT_KM * pct_low)
-        v_out = 0.0
-        p_high, p_low, p_out = _softmax([v_high, v_low, v_out])
-        return {"ride": p_high + p_low, "opt_out": p_out}
+        return {"ride": float(probs["base"]), "opt_out": float(probs["opt_out"])}
 
     def decide_participation(
         self,
@@ -188,7 +213,7 @@ class UserChoiceModel:
         battery_low: float = 0.0,
         user_type: str = "normal",
     ) -> bool:
-        """Return True iff user participates (ride)."""
+        """Legacy helper: True iff action is not opt_out in no-offer mode."""
         probs = self.participation_probabilities(
             walk_base=walk_base,
             trip_duration=trip_duration,
@@ -196,10 +221,7 @@ class UserChoiceModel:
             battery_low=battery_low,
             user_type=user_type,
         )
-        p_ride = probs["ride"]
-        return self.rng.random() < p_ride
-
-    # ── Layer 2: conditional acceptance (offer vs base) ─────────────────────
+        return self.rng.random() < probs["ride"]
 
     def acceptance_probabilities(
         self,
@@ -213,26 +235,26 @@ class UserChoiceModel:
         battery_base: float = 0.0,
         user_type: str = "normal",
     ) -> Dict[str, float]:
-        """
-        Return Layer 2 probabilities over {'offer', 'base'}.
-        When has_offer=False, returns {'offer': 0.0, 'base': 1.0}.
-        """
+        """Legacy helper: conditional {'offer','base'} probabilities."""
         _ = user_type
         if not has_offer:
             return {"offer": 0.0, "base": 1.0}
-
-        v_offer = self._offer_common_utility(
-            walk_offer_min=walk_offer_min,
-            rt_offer_min=rt_offer_min,
+        probs = self.choice_probabilities(
+            has_offer=True,
             incentive_amount=incentive_amount,
-        ) + SARA_BETA_BATT * (SARA_RANGE_PER_PCT_KM * max(0.0, battery_offer))
-        v_base = self._base_common_utility(
-            walk_base=walk_base_min,
-            ride_fee_term=SARA_RIDE_PRICE_PER_MIN * max(0.0, rt_base_min),
-        ) + SARA_BETA_BATT * (SARA_RANGE_PER_PCT_KM * max(0.0, battery_base))
-
-        p_offer, p_base = _softmax([v_offer, v_base])
-        return {"offer": p_offer, "base": p_base}
+            walk_offer_min=walk_offer_min,
+            walk_base_min=walk_base_min,
+            rt_offer_min=rt_offer_min,
+            rt_base_min=rt_base_min,
+            battery_offer=battery_offer,
+            battery_base=battery_base,
+            user_type=user_type,
+        )
+        denom = max(1e-12, float(probs["offer"]) + float(probs["base"]))
+        return {
+            "offer": float(probs["offer"]) / denom,
+            "base": float(probs["base"]) / denom,
+        }
 
     def decide_offer_acceptance(
         self,
@@ -246,7 +268,7 @@ class UserChoiceModel:
         battery_base: float = 0.0,
         user_type: str = "normal",
     ) -> bool:
-        """Return True iff offer is accepted in Layer 2."""
+        """Legacy helper: True iff offer accepted."""
         probs = self.acceptance_probabilities(
             has_offer=has_offer,
             incentive_amount=incentive_amount,
@@ -260,11 +282,9 @@ class UserChoiceModel:
         )
         if not has_offer:
             return False
-        if self.acceptance_mode == "stochastic":
-            return self.rng.random() < probs["offer"]
-        return probs["offer"] >= probs["base"]
-
-    # ── Backward compatibility ───────────────────────────────────────────────
+        if self.acceptance_mode == "deterministic":
+            return probs["offer"] >= probs["base"]
+        return self.rng.random() < probs["offer"]
 
     def choose_relocation_action(
         self,
@@ -282,20 +302,9 @@ class UserChoiceModel:
         battery_base: float = 0.0,
         user_type: str = "normal",
     ) -> str:
-        """
-        Legacy adapter returning 'offer'/'base'/'opt_out' from two-layer logic.
-        """
+        """Backward-compatible adapter returning offer/base/opt_out."""
         _ = (rho0_offer, rho0_base, rho1_offer, rho1_base)
-        ride = self.decide_participation(
-            walk_base=walk_base_min,
-            trip_duration=rt_base_min,
-            battery_high=battery_base,
-            battery_low=battery_base,
-            user_type=user_type,
-        )
-        if not ride:
-            return "opt_out"
-        accepted = self.decide_offer_acceptance(
+        return self.decide_trip_action(
             has_offer=has_offer,
             incentive_amount=incentive_amount,
             walk_offer_min=walk_offer_min,
@@ -306,7 +315,6 @@ class UserChoiceModel:
             battery_base=battery_base,
             user_type=user_type,
         )
-        return "offer" if accepted else "base"
 
     def accept_relocation(
         self,

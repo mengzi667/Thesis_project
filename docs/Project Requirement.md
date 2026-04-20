@@ -37,11 +37,10 @@ At the current stage, OR outputs will be represented by structured placeholder i
 
 ### 2.2 Not Included in Current Phase
 
-- OR model implementation
-- reinforcement learning agent
-- reward function learning
-- policy optimization
-- training pipeline
+- OR model implementation (solver internals stay external in this project)
+- Scenario 2 implementation (joint offer + battery-level action space)
+- upstream OR model redesign / re-optimization method change
+- final policy tuning and thesis-level hyperparameter sensitivity study
 
 ---
 
@@ -311,7 +310,7 @@ If a probabilistic acceptance extension is used later, it must still remain cond
 
 Current implementation note:
 
-* Layer 2 currently uses online binary utility choice (offer vs ase)
+* Layer 2 currently uses online binary utility choice (offer vs base)
 * acceptance realization mode is configurable (deterministic or stochastic)
 
 ### 10.5 Parameter Consistency Requirement
@@ -609,25 +608,27 @@ These can later be mapped into Python files or classes.
 
 ---
 
-## 19. Current Development Tasks
+## 19. Current Development Tasks (Updated Status)
 
-The current development phase should complete the following tasks:
+### 19.1 Completed in Current Repository
 
-1. define the spatial zone structure
-2. define scooter-level and zone-level states
-3. implement the trip request generator
-4. implement the user choice model
-5. implement the OR placeholder interface
-6. implement the event-driven simulation loop
-7. implement state update logic
-8. implement metrics collection
+1. Spatial zone system built from Sara H3 map (zone IDs 1..N).
+2. Scooter-level and zone-level states implemented and synchronized.
+3. Trip generation implemented with switchable sources (`omega_od`, `sara_profile`, `replay`, `poisson`).
+4. Two-layer user behavior implemented for Scenario 1 (participation + conditional acceptance).
+5. OR interface implemented with `U_odit` injection and quota policy handling.
+6. Event-driven simulation loop implemented with battery-aware state transitions.
+7. Battery model upgraded to Sara CSV-conditioned Markov transitions.
+8. KPI logging implemented for service, behavior, and operations.
+9. RL Scenario 1 pipeline implemented (`rl.train`, `rl.evaluate`) with DDQN.
+10. Dense-to-real workflow implemented (pretrain on dense sampling profile, fine-tune/evaluate on target profile).
 
-The following are explicitly not required in this phase:
+### 19.2 Next Required Work
 
-* RL agent
-* reward design
-* policy learning
-* OR model implementation
+1. Add explicit EDL aggregates to evaluation summary outputs (currently EDL is in reward/transition logs but not fully summarized in `eval_summary.csv`).
+2. Run larger-scale RL training/evaluation budgets on fixed seed splits for stable comparison.
+3. Complete thesis-facing analysis tables/figures for OR-only vs OR+RL under target distribution.
+4. Keep Scenario 2 as future extension after Scenario 1 stabilization.
 
 ---
 
@@ -792,13 +793,15 @@ This project builds a modular, extensible, event-driven shared e-scooter simulat
 
 Current repository structure:
 
-* `main.py` and `config.py`: simulation entry and global configuration
-* `simulation/`: environment dynamics (`spatial_system`, `fleet_manager`, `battery_transition`, `trip_generator`, `simulation_engine`, `metrics_logger`, `user_choice_model`, `sara_environment`)
-* `or_model/`: OR input schema, loaders, adapter, and synthetic OR output generator
-* `docs/`: project requirement document
+* `main.py` and `config.py`: simulation entry, runtime wiring, and global switches
+* `simulation/`: environment dynamics (`spatial_system`, `fleet_manager`, `battery_transition`, `trip_generator`, `simulation_engine`, `metrics_logger`, `user_choice_model`, `sara_environment`, `edl_markov`)
+* `or_model/`: OR input schema, loaders, adapter, and translation utilities
+* `rl/`: DDQN training/evaluation pipeline (`train.py`, `evaluate.py`, `agent.py`, `trainer.py`, `runtime.py`, `replay_buffer.py`, `config.py`)
+* `docs/`: requirement and RL operation documents
 * `data/input/`: active simulation input files (currently `u_odit.csv`)
 * `data/generated/`: generated OR artifacts and temporary converted files
-* `results/`: simulation and OR run outputs
+* `results/`: simulation and RL run outputs
+* `experiments/`: auditable experiment records (pre-RL and RL setup summaries)
 * `sara_repo/`: external reference implementation and raw Sara datasets
 
 Path conventions currently used in code:
@@ -806,4 +809,25 @@ Path conventions currently used in code:
 * `SARA_DATA_DIR = "sara_repo/data"`
 * `BATTERY_TRANSITION_CSV = "sara_repo/data/30sep-df_battery_decline_probs.csv"`
 * `OR_INPUT_PATH = "data/input/u_odit.csv"`
-* Sara-output conversion target: `data/generated/u_odit_from_sara.csv`
+* `TRIP_SOURCE = "omega_od"`
+
+Current target evaluation sampling profile (D_eval):
+
+* `OMEGA_GLOBAL_SCALE = 1.0`
+* `OMEGA_WINDOW_START_SLOT = 0`
+* `OMEGA_WINDOW_END_SLOT = 7`
+* `OMEGA_WINDOW_SCALE = 2.0`
+* `OMEGA_OD_TARGET_SCALE = 5.0`
+
+Current RL operational workflow:
+
+1. Run Sara OR externally and translate to `u_odit.csv`.
+2. Pretrain RL on selected dense profile `D_train_dense`.
+3. Resume fine-tune on `D_eval`.
+4. Final evaluation on `D_eval` with fixed held-out seeds.
+
+Reference operation docs:
+
+* `docs/RL_DENSE_TO_REAL_PROTOCOL.md`
+* `docs/Operational_Logic_From_Sara_OR.md`
+

@@ -67,17 +67,44 @@ TRIP_REPLAY_SHEET: str = "Sheet1"    # for .xlsx
 TRIP_REPLAY_SLOT_MINUTES: float = 15.0
 TRIP_REPLAY_TIME_OFFSET_MIN: float = 0.0
 
+# ── omega_od sampling profile (for pre-RL/RL stress on offer-hit) ───────────
+# Expected OD-slot rates are scaled as:
+#   lambda' = lambda * OMEGA_GLOBAL_SCALE
+#   in [OMEGA_WINDOW_START_SLOT, OMEGA_WINDOW_END_SLOT]:
+#       lambda' *= OMEGA_WINDOW_SCALE
+#       if (o,d) appears in U_odit during this window:
+#           lambda' *= OMEGA_OD_TARGET_SCALE
+OMEGA_GLOBAL_SCALE: float = 1.0
+OMEGA_WINDOW_START_SLOT: int = 0
+OMEGA_WINDOW_END_SLOT: int = 7
+OMEGA_WINDOW_SCALE: float = 2.0
+OMEGA_OD_TARGET_SCALE: float = 5.0
+
+# ── omega_od arrival uncertainty model ───────────────────────────────────────
+# Arrival count distribution per (o,d,slot):
+#   poisson : N ~ Poisson(mu)
+#   nb2     : N ~ NB2(mu, phi), Var = mu + phi * mu^2
+OMEGA_ARRIVAL_DIST: str = "nb2"  # poisson | nb2
+# phi lookup mode for nb2:
+#   global           : single scalar phi
+#   by_hour          : one phi per hour (is_weekend ignored)
+#   by_hour_weektype : one phi per (is_weekend, hour)
+OMEGA_NB_PHI_MODE: str = "by_hour"
+OMEGA_NB_PHI_GLOBAL: float = 0.8
+# Optional CSV with schema: phi_mode_key,is_weekend,hour,phi
+OMEGA_NB_PHI_CSV: str = "data/input/nb_phi_profile.csv"
+OMEGA_NB_PHI_MIN: float = 0.05
+OMEGA_NB_PHI_MAX: float = 5.0
+
 # ── User types ─────────────────────────────────────────────────────────────────
 USER_TYPES: list = ["price_sensitive", "time_sensitive", "normal"]
 USER_TYPE_WEIGHTS: list = [0.3, 0.3, 0.4]
 
-# ── Scenario 1 two-layer user behavior (Sara-aligned) ───────────────────────
-# Layer 1 mode:
-#   aggregated_prob : fixed aggregate participation probability (Sara-style)
-#   realtime_choice : compute participation via Sara-consistent utility terms
-FIRST_LAYER_MODE: str = "aggregated_prob"
-# Layer 1 realization is fixed to stochastic Bernoulli(P(ride)) to align with
-# Sara-style probabilistic participation handling.
+# ── Scenario 1 single-layer user behavior (Sara-aligned realtime utility) ─────
+# Runtime mode placeholder kept for compatibility. Single-layer utility is always
+# computed in real time; aggregated mode is not used in current flow.
+FIRST_LAYER_MODE: str = "realtime_choice"
+# Legacy aggregate probabilities retained for backward compatibility.
 SARA_PROB_H: float = 0.70
 SARA_PROB_L: float = 0.18
 SARA_PROB_OUT: float = 0.12

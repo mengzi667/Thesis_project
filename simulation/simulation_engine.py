@@ -1,17 +1,16 @@
 # simulation_engine.py
 # Event-driven simulation engine.
 #
-# Implements the 9-step simulation loop from the requirements:
+# Implements the 8-step simulation loop from the requirements:
 #
 #   Step 1  Trip arrives
 #   Step 2  Query OR interface for relocation opportunity
 #   Step 3  Retrieve recommended target zone (if any)
-#   Step 4  Layer-1 participation decision (ride vs opt_out)
-#   Step 5  Layer-2 acceptance decision (accept offer vs base)
-#   Step 6  Select scooter and execute trip
-#   Step 7  Update battery state
-#   Step 8  Update zone inventories
-#   Step 9  Record metrics
+#   Step 4  Single-layer user decision (offer/base/opt_out)
+#   Step 5  Select scooter and execute trip
+#   Step 6  Update battery state
+#   Step 7  Update zone inventories
+#   Step 8  Record metrics
 #
 # Decision logic (Steps 4-5) is cleanly separated from environment dynamics
 # (Steps 6-7) to allow future RL agent integration with minimal changes.
@@ -32,6 +31,13 @@ from simulation.trip_generator import TripRequest, TripGenerator
 from simulation.user_choice_model import UserChoiceModel
 from or_model.or_interface import ORInterface, RelocationOpportunity
 from simulation.metrics_logger import MetricsLogger, TripRecord, UNSERVED_NO_SUPPLY, UNSERVED_OPT_OUT
+from rl.runtime import (
+    DecisionContext,
+    Scenario1FeatureBuilder,
+    TransitionLogger,
+    estimate_zone_edl,
+    reward_hybrid,
+)
 
 
 class SimulationEngine:
@@ -56,9 +62,18 @@ class SimulationEngine:
         user_model: UserChoiceModel,
         or_interface: ORInterface,
         logger: MetricsLogger,
+        demand_profile=None,
+        rl_policy=None,
+        rl_feature_builder: Optional[Scenario1FeatureBuilder] = None,
+        rl_transition_logger: Optional[TransitionLogger] = None,
+        rl_reward_cfg: Optional[Dict[str, float]] = None,
+        episode_minutes: float = 120.0,
+        budget_remaining: float = 0.0,
+        edl_model=None,
         ride_time_minutes: Optional[Dict[int, Dict[int, float]]] = None,
         snapshot_interval: float = SNAPSHOT_INTERVAL,
         verbose: bool = False,
+        print_snapshots: bool = True,
     ) -> None:
         self.spatial = spatial
         self.fleet = fleet
@@ -66,10 +81,24 @@ class SimulationEngine:
         self.user_model = user_model
         self.or_interface = or_interface
         self.logger = logger
+        self.demand_profile = demand_profile
+        self.rl_policy = rl_policy
+        self.rl_feature_builder = rl_feature_builder
+        self.rl_transition_logger = rl_transition_logger
+        self.rl_reward_cfg = rl_reward_cfg or {"reward_lambda": 0.7, "beta_c": 1.0, "beta_r": 0.1, "l_ref": 1.0, "e_ref": 1.0}
+        self.episode_minutes = float(episode_minutes)
+        self.budget_remaining = float(budget_remaining)
+        self.zone_ids = sorted(self.spatial.all_zone_ids())
+        self.edl_model = edl_model
         self.ride_time_minutes = ride_time_minutes or {}
         self.snapshot_interval = snapshot_interval
         self.verbose = verbose
+        self.print_snapshots = bool(print_snapshots)
         self._current_time: float = 0.0
+        # Delayed reward bookkeeping (Rina-style):
+        # accumulate realized loss between two RL decision points.
+        self._pending_rl_transition: Optional[dict] = None
+        self._pending_realized_loss: float = 0.0
 
     @property
     def current_time(self) -> float:
@@ -84,6 +113,8 @@ class SimulationEngine:
         """
         trips = self.trip_gen.generate_trips(sim_duration)
         next_snapshot = self.snapshot_interval
+        self._pending_rl_transition = None
+        self._pending_realized_loss = 0.0
 
         for trip in trips:
             self._current_time = trip.request_time
@@ -95,10 +126,18 @@ class SimulationEngine:
                     time=next_snapshot,
                     zone_state=zone_state,
                 )
-                self._print_snapshot(next_snapshot, zone_state)
+                if self.print_snapshots:
+                    self._print_snapshot(next_snapshot, zone_state)
                 next_snapshot += self.snapshot_interval
 
             self._process_trip(trip)
+
+        # Flush last pending RL transition at episode end.
+        if self._pending_rl_transition is not None:
+            self._finalize_pending_transition(
+                next_state=self._pending_rl_transition["state"],
+                done=1.0,
+            )
 
         # Final snapshot at end of simulation
         zone_state = self.spatial.get_state_snapshot()
@@ -106,7 +145,8 @@ class SimulationEngine:
             time=self._current_time,
             zone_state=zone_state,
         )
-        self._print_snapshot(self._current_time, zone_state, final=True)
+        if self.print_snapshots:
+            self._print_snapshot(self._current_time, zone_state, final=True)
         self.logger.set_or_injection_metrics(self.or_interface.stats())
         return self.logger
 
@@ -123,19 +163,27 @@ class SimulationEngine:
             request_time=trip.request_time,
         )
 
-        # ── Step 4: Layer-1 participation (ride vs opt_out) ─────────────────
+        # ── Step 4: Single-layer decision (offer/base/opt_out) ──────────────
         relocation_offered = reloc_opp is not None
         relocation_accepted = False
         effective_dest = trip.destination_zone
         extra_walk: float = 0.0
         user_choice: Optional[str] = None
+        rl_state = None
+        rl_action = None
+        rl_edl_before: Dict[int, float] = {}
+        rl_slot_d = None
+        rl_slot_i = None
+        rt_base_min = 0.0
+        rt_offer_min = 0.0
+        walk_offer_min = 0.0
 
         if reloc_opp is not None:
             extra_walk = self.spatial.distance_between(
                 trip.destination_zone, reloc_opp.recommended_dest
             )
 
-        # ── Step 5: Scooter selection — default logic: high-battery first ─────
+        # ── Step 5: Scooter supply check ─────────────────────────────────────
         available = self.fleet.get_available_scooters(
             trip.origin_zone, current_time=trip.request_time
         )
@@ -166,19 +214,83 @@ class SimulationEngine:
                     chosen=None, effective_dest=effective_dest,
                     outcome=UNSERVED_NO_SUPPLY,
                 )
+            self._record_realized_loss(1.0)
             return
 
-        participates = self.user_model.decide_participation(
-            walk_base=0.0,
-            trip_duration=trip.trip_duration,
-            battery_high=0.0,
-            battery_low=0.0,
+        # ── Step 4 (cont.): compute trip/offer attributes ────────────────────
+        if reloc_opp is not None:
+            walk_offer_min = self._meters_to_minutes(extra_walk, SARA_WALK_SPEED_KMH)
+            rt_base_min = self._ride_minutes_between(
+                trip.origin_zone, trip.destination_zone, SARA_RIDE_SPEED_KMH
+            )
+            rt_offer_min = self._ride_minutes_between(
+                trip.origin_zone, reloc_opp.recommended_dest, SARA_RIDE_SPEED_KMH
+            )
+
+            # Optional RL decision hook at offer opportunities
+            if self.rl_policy is not None and self.rl_feature_builder is not None:
+                zone_state_before = self.spatial.get_state_snapshot()
+                slot_req = int(trip.request_time // self.snapshot_interval)
+                rl_slot_d = int((trip.request_time + rt_base_min) // self.snapshot_interval)
+                rl_slot_i = int((trip.request_time + rt_offer_min) // self.snapshot_interval)
+                for z in (trip.origin_zone, trip.destination_zone, reloc_opp.recommended_dest):
+                    rl_edl_before[z] = estimate_zone_edl(
+                        zone_id=z,
+                        slot_idx=slot_req,
+                        zone_state=zone_state_before,
+                        planning_period=self.snapshot_interval,
+                        demand_profile=self.demand_profile,
+                        zone_ids=self.zone_ids,
+                        edl_model=self.edl_model,
+                    )
+                ctx = DecisionContext(
+                    request_time=trip.request_time,
+                    planning_period=self.snapshot_interval,
+                    episode_minutes=self.episode_minutes,
+                    origin=trip.origin_zone,
+                    destination=trip.destination_zone,
+                    recommended=reloc_opp.recommended_dest,
+                    rt_base_min=rt_base_min,
+                    rt_offer_min=rt_offer_min,
+                    walk_extra_min=walk_offer_min,
+                    incentive_amount=reloc_opp.incentive_amount,
+                    offered=True,
+                    accepted=False,
+                    rejected=False,
+                    quota_remaining=float(reloc_opp.quota_remaining),
+                    budget_remaining=float(self.budget_remaining),
+                    zone_state_before=zone_state_before,
+                    zone_state_after=zone_state_before,
+                )
+                rl_state = self.rl_feature_builder.build(ctx, rl_edl_before)
+                # Delayed reward: finalize previous decision when new decision state arrives.
+                self._finalize_pending_transition(next_state=rl_state, done=0.0)
+                rl_action = int(self.rl_policy.act(rl_state))
+                if rl_action == 0:
+                    relocation_offered = False
+                else:
+                    relocation_offered = True
+
+        # Single-layer user decision.
+        # In Scenario 1 the scooter assignment is deterministic (highest battery),
+        # so both offer/base branches observe the same origin scooter quality.
+        best_battery_pct = max(float(s.battery_level) for s in available) * 100.0
+        user_choice = self.user_model.decide_trip_action(
+            has_offer=bool(relocation_offered),
+            incentive_amount=float(reloc_opp.incentive_amount) if (reloc_opp and relocation_offered) else 0.0,
+            walk_offer_min=walk_offer_min,
+            walk_base_min=0.0,
+            rt_offer_min=rt_offer_min,
+            rt_base_min=rt_base_min,
+            battery_offer=best_battery_pct,
+            battery_base=best_battery_pct,
             user_type=trip.user_type,
         )
-        if not participates:
+
+        if user_choice == "opt_out":
+            relocation_accepted = False
             if reloc_opp is not None:
                 self.or_interface.consume_after_decision(reloc_opp, accepted=False)
-            user_choice = "opt_out"
             self.logger.log_trip(TripRecord(
                 request_id=trip.request_id,
                 origin_zone=trip.origin_zone,
@@ -194,6 +306,19 @@ class SimulationEngine:
                 user_choice="opt_out",
                 unserved_reason=UNSERVED_OPT_OUT,
             ))
+            self._queue_pending_rl_transition(
+                trip=trip,
+                reloc_opp=reloc_opp,
+                rl_state=rl_state,
+                rl_action=rl_action,
+                rl_edl_before=rl_edl_before,
+                rl_slot_d=rl_slot_d,
+                rl_slot_i=rl_slot_i,
+                relocation_offered=relocation_offered,
+                relocation_accepted=False,
+                chosen=None,
+                zone_state_after=self.spatial.get_state_snapshot(),
+            )
             if self.verbose:
                 self._print_trip_event(
                     trip, reloc_opp, extra_walk, relocation_accepted,
@@ -202,35 +327,16 @@ class SimulationEngine:
                 )
             return
 
-        # ── Step 5: Layer-2 acceptance (conditional on participation) ───────
-        if reloc_opp is not None:
-            walk_offer_min = self._meters_to_minutes(extra_walk, SARA_WALK_SPEED_KMH)
-            walk_base_min = 0.0
-            rt_base_min = self._ride_minutes_between(
-                trip.origin_zone, trip.destination_zone, SARA_RIDE_SPEED_KMH
-            )
-            rt_offer_min = self._ride_minutes_between(
-                trip.origin_zone, reloc_opp.recommended_dest, SARA_RIDE_SPEED_KMH
-            )
-            relocation_accepted = self.user_model.decide_offer_acceptance(
-                has_offer=True,
-                incentive_amount=reloc_opp.incentive_amount,
-                walk_offer_min=walk_offer_min,
-                walk_base_min=walk_base_min,
-                rt_offer_min=rt_offer_min,
-                rt_base_min=rt_base_min,
-                battery_offer=0.0,
-                battery_base=0.0,
-                user_type=trip.user_type,
-            )
-            if relocation_accepted:
-                effective_dest = reloc_opp.recommended_dest
+        relocation_accepted = bool(
+            user_choice == "offer" and reloc_opp is not None and relocation_offered
+        )
+        if relocation_accepted and reloc_opp is not None:
+            effective_dest = reloc_opp.recommended_dest
 
         if reloc_opp is not None:
             self.or_interface.consume_after_decision(reloc_opp, accepted=relocation_accepted)
-        user_choice = "offer" if relocation_accepted else "base"
 
-        # ── Step 6: Scooter assignment (Scenario 1: highest battery first) ──
+        # ── Step 5 (cont.): Scooter assignment (Scenario 1 rule) ────────────
         chosen: Optional[Scooter] = self._decide_scooter(available, trip)
 
         if chosen is None:
@@ -256,12 +362,13 @@ class SimulationEngine:
                     chosen=None, effective_dest=effective_dest,
                     outcome=UNSERVED_NO_SUPPLY,
                 )
+            self._record_realized_loss(1.0)
             return
 
-        # ── Step 6 (cont.): Pickup ───────────────────────────────────────────
+        # ── Step 5 (cont.): Pickup ───────────────────────────────────────────
         self.fleet.pickup_scooter(chosen)
 
-        # ── Steps 7 & 8: Drop-off — updates battery + zone inventories ──────
+        # ── Steps 6 & 7: Drop-off — battery + zone inventories ──────────────
         arrival_time = trip.request_time + trip.trip_duration
         self.fleet.dropoff_scooter(
             scooter=chosen,
@@ -269,7 +376,7 @@ class SimulationEngine:
             arrival_time=arrival_time,
         )
 
-        # ── Step 9: Record metrics ───────────────────────────────────────────
+        # ── Step 8: Record metrics ───────────────────────────────────────────
         self.logger.log_trip(TripRecord(
             request_id=trip.request_id,
             origin_zone=trip.origin_zone,
@@ -285,6 +392,20 @@ class SimulationEngine:
             user_choice=user_choice,
             unserved_reason=None,
         ))
+
+        self._queue_pending_rl_transition(
+            trip=trip,
+            reloc_opp=reloc_opp,
+            rl_state=rl_state,
+            rl_action=rl_action,
+            rl_edl_before=rl_edl_before,
+            rl_slot_d=rl_slot_d,
+            rl_slot_i=rl_slot_i,
+            relocation_offered=relocation_offered,
+            relocation_accepted=relocation_accepted,
+            chosen=chosen,
+            zone_state_after=self.spatial.get_state_snapshot(),
+        )
         if self.verbose:
             self._print_trip_event(
                 trip, reloc_opp, extra_walk, relocation_accepted,
@@ -293,6 +414,172 @@ class SimulationEngine:
             )
 
     # ── Decision hook ─────────────────────────────────────────────────────────
+
+    def _queue_pending_rl_transition(
+        self,
+        trip: TripRequest,
+        reloc_opp: Optional[RelocationOpportunity],
+        rl_state,
+        rl_action,
+        rl_edl_before: Dict[int, float],
+        rl_slot_d,
+        rl_slot_i,
+        relocation_offered: bool,
+        relocation_accepted: bool,
+        chosen: Optional[Scooter],
+        zone_state_after: Dict[int, tuple],
+    ) -> None:
+        if (
+            self.rl_transition_logger is None
+            or self.rl_feature_builder is None
+            or rl_state is None
+            or rl_action is None
+            or reloc_opp is None
+            or rl_slot_d is None
+            or rl_slot_i is None
+        ):
+            return
+
+        edl_after_d = estimate_zone_edl(
+            zone_id=trip.destination_zone,
+            slot_idx=rl_slot_d,
+            zone_state=zone_state_after,
+            planning_period=self.snapshot_interval,
+            demand_profile=self.demand_profile,
+            zone_ids=self.zone_ids,
+            edl_model=self.edl_model,
+        )
+        edl_after_i = estimate_zone_edl(
+            zone_id=reloc_opp.recommended_dest,
+            slot_idx=rl_slot_i,
+            zone_state=zone_state_after,
+            planning_period=self.snapshot_interval,
+            demand_profile=self.demand_profile,
+            zone_ids=self.zone_ids,
+            edl_model=self.edl_model,
+        )
+        reject_flag = bool(relocation_offered and (not relocation_accepted))
+        # Reward cost accounting: real payout only when user accepts.
+        cost_term = float(reloc_opp.incentive_amount) if relocation_accepted else 0.0
+
+        if self.edl_model is not None:
+            # Sara-aligned cumulative EDL comparison:
+            # baseline(no-offer) vs actual action outcome, from t+RT to episode end.
+            d = int(trip.destination_zone)
+            i = int(reloc_opp.recommended_dest)
+            t_end_slot = int(max(0, self.episode_minutes // self.snapshot_interval))
+
+            actual_d = tuple(zone_state_after.get(d, (0, 0, 0)))
+            actual_i = tuple(zone_state_after.get(i, (0, 0, 0)))
+            base_d = actual_d
+            base_i = actual_i
+
+            # Build baseline counterfactual state from actual state.
+            # If relocation was accepted, move one scooter of the realized
+            # post-trip battery class back from i to d.
+            if relocation_accepted and d != i and chosen is not None:
+                cat_idx = {"inactive": 0, "low": 1, "high": 2}.get(str(chosen.battery_category), 2)
+                bd = list(base_d)
+                bi = list(base_i)
+                if bi[cat_idx] > 0:
+                    bi[cat_idx] -= 1
+                    bd[cat_idx] += 1
+                base_d = tuple(bd)
+                base_i = tuple(bi)
+
+            base_cum_edl = float(
+                self.edl_model.station_cumulative_edl(d, int(rl_slot_d), t_end_slot, base_d)
+                + self.edl_model.station_cumulative_edl(i, int(rl_slot_i), t_end_slot, base_i)
+            )
+            actual_cum_edl = float(
+                self.edl_model.station_cumulative_edl(d, int(rl_slot_d), t_end_slot, actual_d)
+                + self.edl_model.station_cumulative_edl(i, int(rl_slot_i), t_end_slot, actual_i)
+            )
+            delta_edl = float(base_cum_edl - actual_cum_edl)
+        else:
+            base_cum_edl = float(
+                rl_edl_before.get(trip.destination_zone, 0.0)
+                + rl_edl_before.get(reloc_opp.recommended_dest, 0.0)
+            )
+            actual_cum_edl = float(edl_after_d + edl_after_i)
+            delta_edl = float(base_cum_edl - actual_cum_edl)
+
+        # Delay reward until next decision: keep this as pending transition.
+        self._pending_rl_transition = {
+            "request_id": trip.request_id,
+            "time_min": float(trip.request_time),
+            "origin": trip.origin_zone,
+            "destination": trip.destination_zone,
+            "recommended_dest": reloc_opp.recommended_dest,
+            "action": int(rl_action),
+            "offered": int(bool(relocation_offered)),
+            "accepted": int(bool(relocation_accepted)),
+            "reject_flag": int(reject_flag),
+            "delta_edl": float(delta_edl),
+            "base_cum_edl": float(base_cum_edl),
+            "actual_cum_edl": float(actual_cum_edl),
+            "cost_term": float(cost_term),
+            "state": rl_state.astype("float32"),
+        }
+        self._pending_realized_loss = 0.0
+
+    def _record_realized_loss(self, value: float) -> None:
+        if self._pending_rl_transition is None:
+            return
+        self._pending_realized_loss += float(max(0.0, value))
+
+    def _finalize_pending_transition(self, next_state, done: float) -> None:
+        if self._pending_rl_transition is None or self.rl_transition_logger is None:
+            return
+        p = self._pending_rl_transition
+        realized_loss = float(self._pending_realized_loss)
+        delta_edl = float(p["delta_edl"])
+        cost_term = float(p["cost_term"])
+        reject_flag = bool(p["reject_flag"])
+        reward_lambda = float(self.rl_reward_cfg.get("reward_lambda", 0.7))
+        l_ref = max(1e-9, float(self.rl_reward_cfg.get("l_ref", 1.0)))
+        e_ref = max(1e-9, float(self.rl_reward_cfg.get("e_ref", 1.0)))
+        realized_norm = min(max(realized_loss / l_ref, 0.0), 1.0)
+        delta_edl_norm = min(max(delta_edl / e_ref, -1.0), 1.0)
+        reward_realized_term = reward_lambda * (-realized_norm)
+        reward_edl_term = (1.0 - reward_lambda) * delta_edl_norm
+        reward = reward_hybrid(
+            reward_lambda=reward_lambda,
+            beta_c=float(self.rl_reward_cfg.get("beta_c", 1.0)),
+            beta_r=float(self.rl_reward_cfg.get("beta_r", 0.1)),
+            l_ref=l_ref,
+            e_ref=e_ref,
+            realized_loss=realized_loss,
+            delta_edl=delta_edl,
+            cost_term=cost_term,
+            reject_flag=reject_flag,
+        )
+        self.rl_transition_logger.append(
+            {
+                "request_id": int(p["request_id"]),
+                "time_min": float(p["time_min"]),
+                "origin": int(p["origin"]),
+                "destination": int(p["destination"]),
+                "recommended_dest": int(p["recommended_dest"]),
+                "action": int(p["action"]),
+                "offered": int(p["offered"]),
+                "accepted": int(p["accepted"]),
+                "reject_flag": int(p["reject_flag"]),
+                "delta_edl": float(delta_edl),
+                "base_cum_edl": float(p.get("base_cum_edl", 0.0)),
+                "actual_cum_edl": float(p.get("actual_cum_edl", 0.0)),
+                "realized_loss": float(realized_loss),
+                "cost_term": float(cost_term),
+                "reward_realized_term": float(reward_realized_term),
+                "reward_edl_term": float(reward_edl_term),
+                "reward": float(reward),
+                "done": float(done),
+                "state": p["state"],
+                "next_state": next_state.astype("float32"),
+            }
+        )
+        self._pending_rl_transition = None
+        self._pending_realized_loss = 0.0
 
     # ── Output helpers ────────────────────────────────────────────────────────
 
@@ -391,8 +678,7 @@ class SimulationEngine:
         high-battery first and descending battery level, so available[0] is
         always the best choice.
 
-        UserChoiceModel is NOT involved here — it handles only relocation
-        acceptance (accept_relocation).  For future RL integration, replace
+        UserChoiceModel is NOT involved here — user action selection is handled earlier in the single-layer decision step. For future RL integration, replace
         this method body with agent.select_action(state).
         """
         if not available:
