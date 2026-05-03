@@ -10,6 +10,7 @@ from tqdm.auto import tqdm
 from rl.agent import DDQNAgent
 from rl.config import RLConfig
 from rl.replay_buffer import ReplayBuffer
+from rl.trip_report import write_trip_run_report
 from rl.trainer import (
     EpsilonPolicy,
     dump_training_meta,
@@ -25,7 +26,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--output-dir", type=str, default=None)
     p.add_argument("--device", type=str, default="cpu")
     p.add_argument("--checkpoint-every", type=int, default=200)
-    p.add_argument("--reward-lambda", type=float, default=None)
+    p.add_argument("--w-l", type=float, default=None)
+    p.add_argument("--w-e", type=float, default=None)
+    p.add_argument("--beta-a", type=float, default=None)
     p.add_argument("--beta-c", type=float, default=None)
     p.add_argument("--beta-r", type=float, default=None)
     p.add_argument("--l-ref", type=float, default=None)
@@ -35,9 +38,13 @@ def parse_args() -> argparse.Namespace:
 
     # fine-tune friendly overrides
     p.add_argument("--lr", type=float, default=None)
+    p.add_argument("--hidden-dim", type=int, default=None)
     p.add_argument("--epsilon-start", type=float, default=None)
     p.add_argument("--epsilon-end", type=float, default=None)
     p.add_argument("--epsilon-decay-steps", type=int, default=None)
+    p.add_argument("--transition-dump-every", type=int, default=None)
+    p.add_argument("--early-stop-episode", type=int, default=None)
+    p.add_argument("--early-stop-min-offers", type=float, default=None)
 
     # optional OR input path override
     p.add_argument("--or-input-path", type=str, default=None)
@@ -65,8 +72,12 @@ def main() -> None:
         cfg.train_episodes = int(args.episodes)
     if args.output_dir is not None:
         cfg.output_dir = str(args.output_dir)
-    if args.reward_lambda is not None:
-        cfg.reward_lambda = float(args.reward_lambda)
+    if args.w_l is not None:
+        cfg.w_l = float(args.w_l)
+    if args.w_e is not None:
+        cfg.w_e = float(args.w_e)
+    if args.beta_a is not None:
+        cfg.beta_a = float(args.beta_a)
     if args.beta_c is not None:
         cfg.beta_c = float(args.beta_c)
     if args.beta_r is not None:
@@ -80,12 +91,20 @@ def main() -> None:
 
     if args.lr is not None:
         cfg.lr = float(args.lr)
+    if args.hidden_dim is not None:
+        cfg.hidden_dim = int(args.hidden_dim)
     if args.epsilon_start is not None:
         cfg.epsilon_start = float(args.epsilon_start)
     if args.epsilon_end is not None:
         cfg.epsilon_end = float(args.epsilon_end)
     if args.epsilon_decay_steps is not None:
         cfg.epsilon_decay_steps = int(args.epsilon_decay_steps)
+    if args.transition_dump_every is not None:
+        cfg.transition_dump_every = max(0, int(args.transition_dump_every))
+    if args.early_stop_episode is not None:
+        cfg.early_stop_episode = int(args.early_stop_episode)
+    if args.early_stop_min_offers is not None:
+        cfg.early_stop_min_offers = float(args.early_stop_min_offers)
 
     if args.or_input_path is not None:
         cfg.or_input_path = str(args.or_input_path)
@@ -143,11 +162,18 @@ def main() -> None:
     trip_counts = []
 
     seeds = cfg.train_seeds()
+    all_trip_rows: list[dict] = []
     pbar = tqdm(seeds, total=cfg.train_episodes, desc="RL train", unit="ep")
     for ep_idx, seed in enumerate(pbar, start=1):
         eps = epsilon_by_step(global_step, cfg)
         policy = EpsilonPolicy(agent=agent, epsilon=eps, rng=rng)
         ep_result, tlog = run_episode(seed=seed, cfg=cfg, policy=policy)
+        if tlog.trip_rows:
+            for r in tlog.trip_rows:
+                row = dict(r)
+                row["episode"] = ep_idx
+                row["seed"] = seed
+                all_trip_rows.append(row)
 
         transitions_to_replay(tlog, replay)
 
@@ -177,6 +203,22 @@ def main() -> None:
         trip_count_mean = float(tc.mean()) if tc.size else 0.0
         trip_count_var = float(tc.var(ddof=1)) if tc.size > 1 else 0.0
         trip_count_fano = float(trip_count_var / trip_count_mean) if trip_count_mean > 1e-12 else 0.0
+        l_ref = max(1e-9, float(cfg.l_ref))
+        e_ref = max(1e-9, float(cfg.e_ref))
+        realized_vals = [float(r.get("realized_loss", 0.0)) for r in tlog.rows]
+        delta_vals = [float(r.get("delta_edl", 0.0)) for r in tlog.rows]
+        if realized_vals:
+            realized_norm_vals = [float(min(max(v / l_ref, 0.0), 1.0)) for v in realized_vals]
+            delta_norm_vals = [float(min(max(v / e_ref, -1.0), 1.0)) for v in delta_vals]
+            realized_clip_hit_rate = float(sum(1 for v in realized_vals if (v / l_ref) >= 1.0) / len(realized_vals))
+            delta_clip_hit_rate = float(sum(1 for v in delta_vals if abs(v / e_ref) >= 1.0) / len(delta_vals))
+            mean_realized_norm = float(sum(realized_norm_vals) / len(realized_norm_vals))
+            mean_delta_norm = float(sum(delta_norm_vals) / len(delta_norm_vals))
+        else:
+            realized_clip_hit_rate = 0.0
+            delta_clip_hit_rate = 0.0
+            mean_realized_norm = 0.0
+            mean_delta_norm = 0.0
 
         episode_rows.append(
             {
@@ -185,6 +227,7 @@ def main() -> None:
                 "epsilon": eps,
                 "total_requests": ep_result.total_requests,
                 "served_trips": ep_result.served_trips,
+                "unserved_no_supply": ep_result.unserved_no_supply,
                 "service_rate": ep_result.service_rate,
                 "relocation_offers": offers,
                 "relocation_accepted": acc,
@@ -195,10 +238,16 @@ def main() -> None:
                 "sum_reward_realized_term": ep_result.sum_reward_realized_term,
                 "mean_reward_edl_term": ep_result.mean_reward_edl_term,
                 "sum_reward_edl_term": ep_result.sum_reward_edl_term,
+                "mean_reward_accept_term": ep_result.mean_reward_accept_term,
+                "sum_reward_accept_term": ep_result.sum_reward_accept_term,
                 "mean_realized_loss": ep_result.mean_realized_loss,
                 "sum_realized_loss": ep_result.sum_realized_loss,
                 "mean_delta_edl": ep_result.mean_delta_edl,
                 "sum_delta_edl": ep_result.sum_delta_edl,
+                "mean_realized_norm": mean_realized_norm,
+                "mean_delta_edl_norm": mean_delta_norm,
+                "realized_clip_hit_rate": realized_clip_hit_rate,
+                "delta_edl_clip_hit_rate": delta_clip_hit_rate,
                 "generated_trips": generated_trips,
                 "trip_count_mean": trip_count_mean,
                 "trip_count_var": trip_count_var,
@@ -210,7 +259,7 @@ def main() -> None:
         )
 
         # Persist transitions for audit/debug
-        if len(tlog) > 0:
+        if len(tlog) > 0 and (cfg.transition_dump_every > 0) and (ep_idx % cfg.transition_dump_every == 0):
             pd.DataFrame(tlog.rows).drop(columns=["state", "next_state"]).to_csv(
                 out / "metrics" / f"transitions_ep{ep_idx:04d}.csv", index=False
             )
@@ -223,19 +272,25 @@ def main() -> None:
                 "eps": f"{eps:.3f}",
                 "loss": f"{mean_loss_ep:.4f}" if not np.isnan(mean_loss_ep) else "na",
                 "R": f"{ep_result.mean_reward:.3f}",
-                "hit": int(ep_result.transitions),
                 "offers": offers,
                 "acc%": f"{accept_rate:.1%}",
                 "Lr": f"{ep_result.mean_reward_realized_term:.3f}",
                 "Le": f"{ep_result.mean_reward_edl_term:.3f}",
+                "La": f"{ep_result.mean_reward_accept_term:.3f}",
                 "rLoss": f"{ep_result.mean_realized_loss:.3f}",
-                "dEDL": f"{ep_result.mean_delta_edl:.3f}",
-                "nTrip": generated_trips,
-                "fano": f"{trip_count_fano:.2f}",
-                "buf": int(len(replay)),
-                "upd": int(updates_this_episode),
+                "Lclip%": f"{realized_clip_hit_rate:.1%}",
+                "Eclip%": f"{delta_clip_hit_rate:.1%}",
             }
         )
+
+        if cfg.early_stop_episode is not None and cfg.early_stop_min_offers is not None and ep_idx >= cfg.early_stop_episode:
+            mean_offers_so_far = float(np.mean([float(r["relocation_offers"]) for r in episode_rows]))
+            if mean_offers_so_far < float(cfg.early_stop_min_offers):
+                print(
+                    f"[EARLY STOP] ep={ep_idx} mean_offers={mean_offers_so_far:.4f} "
+                    f"< threshold={float(cfg.early_stop_min_offers):.4f}"
+                )
+                break
 
         if ep_idx >= cfg.train_episodes:
             break
@@ -244,6 +299,12 @@ def main() -> None:
     agent.save(str(out / "checkpoints" / "ddqn_final.pt"))
     pd.DataFrame(episode_rows).to_csv(out / "metrics" / "train_episode_metrics.csv", index=False)
     pd.DataFrame(loss_rows).to_csv(out / "metrics" / "train_loss_curve.csv", index=False)
+    write_trip_run_report(
+        trip_rows=all_trip_rows,
+        output_dir=out,
+        planning_period_min=float(cfg.planning_period),
+        file_prefix="train_trip",
+    )
 
     dump_training_meta(
         str(out / "metrics" / "train_meta.json"),
@@ -257,7 +318,9 @@ def main() -> None:
             "epsilon_start": cfg.epsilon_start,
             "epsilon_end": cfg.epsilon_end,
             "epsilon_decay_steps": cfg.epsilon_decay_steps,
-            "reward_lambda": cfg.reward_lambda,
+            "w_l": cfg.w_l,
+            "w_e": cfg.w_e,
+            "beta_a": cfg.beta_a,
             "beta_c": cfg.beta_c,
             "beta_r": cfg.beta_r,
             "l_ref": cfg.l_ref,
@@ -276,6 +339,9 @@ def main() -> None:
                 "nb_phi_min": cfg.omega_nb_phi_min,
                 "nb_phi_max": cfg.omega_nb_phi_max,
             },
+            "transition_dump_every": cfg.transition_dump_every,
+            "early_stop_episode": cfg.early_stop_episode,
+            "early_stop_min_offers": cfg.early_stop_min_offers,
             "resumed_from": resumed_from,
             "mean_loss": agent.stats.mean_loss,
             "num_updates": agent.stats.updates,

@@ -1,0 +1,127 @@
+\chapter{Introduction}
+\label{chapter:introduction}
+
+\section{Background}
+
+As cities grow and the demand for greener travel mode rises, shared micromobility systems (shared bikes and e-scooters) have become a critical part of modern urban infrastructure \parencite{shaheen2021shared}. By providing flexible last-mile connectivity, these systems play a vital role in reducing private vehicle dependency, alleviating traffic congestion, and lowering urban carbon footprints \parencite{zhong2022bikecap, zhang2018environmental}. 
+
+Recently, the industry has transitioned from a phase of aggressive fleet size expansion to ensuring reliable service and a better user experience. For operators, the primary performance metric has shifted from simple fleet size to Service Level (SL) and Perceived Usability \parencite{momen2025}. Perceived usability, as defined in recent literature \parencite{momen2025}, suggests that a vehicle is only truly ``available" if it is geographically accessible, functionally operational, and possesses a State-of-Charge sufficient to complete the user's intended journey.
+
+To maintain high service levels in the face of inherently stochastic demand, operators employ rebalancing strategies. These are typically organized into a hierarchical control structure: For rebalancing planning, operators utilize predictive models (often based on Markovian state transitions) to generate macro-level rebalancing plans at certain time intervals. These plans set target inventory levels for specific urban grids to address expected imbalances \parencite{momen2025}; Further, to realize the rebalancing targets, systems usually rely on a combination of operator-based redistribution (vans/trucks) and user-mediated incentives. The latter, which suggests users parking in ``deficit" zones through financial rewards, has been proved to be a more agile, cost-effective, and environmentally friendly alternative for dynamic adjustments \parencite{tan2023}.
+
+% However, the inherent flexibility of the free-floating model presents significant operational hurdles. The primary challenge remains the spatial-temporal mismatch between vehicle supply and user demand, an imbalance exacerbated not only by stochastic user arrivals but also by the finite battery life and energy depletion of the fleet, which severely undermines overall service reliability and system efficiency \parencite{momen2025, tan2023}.
+
+\section{Gap Analysis}
+
+To achieve an optimal service level, an ideal e-scooter system should match supply with demand perfectly in terms of location, timing, and battery levels at the lowest possible cost. However, there is a huge gap between this theoretical standard and current operational realities, which can be divided into two dimensions:
+
+\paragraph{The Temporal Resolution Gap}
+
+Ideally, scheduling should be triggered in real time to ensure uninterrupted service. However, current rebalancing models often use certain intervals (e.g., 15 minutes) and assume constant demand within those intervals \parencite{guan2024data}. This time trade-off comes at a cost: it makes the model insensitive to micro-fluctuations. Neither weather changes nor sudden surges in demand caused by unforeseen events can be reflected in interval-level rebalancing guidance \parencite{saum2024optimizing}. From a theoretical perspective, stochastic models for e-scooter systems have confirmed this limitation: because the control strategy is based on discrete time, its handling of randomness is limited to statistical summaries within a time period. High-frequency dynamics that truly reflect the real-time state of the system are inevitably lost in this process \parencite{pender2020stochastic}.
+
+In real-world scenarios, demand fluctuations are often sudden and far more dramatic than static planning can capture. A grid cell might be in a state of equilibrium at the start of a cycle, but experience a surge in demand within the last 5 minutes. If such a periodically updated plan were fully implemented, the system would suffer from lost demand and revenue.
+
+\paragraph{The Intervention Precision Gap}
+
+Ideally, all subsidy budgets should be precisely allocated to orders that contribute most to system balance. In other words, rewards should only be triggered when user behavior prevents or mitigates potential vehicle shortages. However, in practice, existing solutions often remain at a 'upper level,' only defining macro-level targets (such as regional inventory targets or expected demand fulfillment rates) without guiding how to handle each specific vehicle request \parencite{guan2024data}. This lack of granularity leads to subsidies being distributed broadly by time period or region \parencite{neijmeijer2020}. 
+
+Lacking an execution layer capable of making real-time 'give or not give' decisions, the system cannot distinguish between invalid orders that would occur regardless of whether subsidies are given and those truly crucial for balancing the system \parencite{emami2024integrated}, resulting in severe budget inefficiency.
+
+\paragraph{Related Evidence from Similar Studies}
+
+% This structural “blindness” of tactical models has been identified as a key source of performance degradation under atypical or volatile demand conditions. Recent work therefore advocates hybrid or hierarchical frameworks in which slow-time-scale tactical optimization is complemented by fast-time-scale operational or real-time control mechanisms to mitigate the impact of unresolved high-frequency fluctuations\parencite{tan2025small}.
+
+% The Temporal Granularity Gap
+% Current operational strategies often rely on tactical optimization models (e.g., Markovian state prediction) to generate rebalancing plans \parencite{momen2025}. Tactical optimization models for shared e-scooter systems are typically formulated on coarse, discrete time steps (e.g., every 15 minutes) in order to ensure computational tractability and operational feasibility. Within each decision interval, demand is commonly aggregated using expected values, sampled scenarios, or empirical distributions, implicitly assuming that system dynamics remain stationary over the window
+
+% This creates a \textbf{``Temporal Granularity Gap"}:
+%     Tactical models assume demand is aggregated within the planning window, ignoring the precise sequence of arrivals. While in reality, user requests occur stochastically in continuous time. A station deemed "balanced" at minute 0 may become empty by minute 5 due to a burst of demand.
+% Between plan updates, the system is effectively ``inactive" to deviations. Rigidly executing a 15-minute-old plan can lead to inefficient budget allocation and unmet demand.
+
+% Beyond spatial imbalance, real-time SoC fluctuations create a 'hidden' deficit where vehicles appear physically present but are practically unavailable due to low battery levels. Existing tactical models struggle to capture this intra-period energy depletion.
+
+The limitations induced by coarse temporal resolution and macro-level interventions are not unique to shared micromobility systems. Similar challenges have been studied in other urban mobility fields, particularly ride-hailing and mobility-on-demand services. Early operational frameworks in these systems relied on batch-based or periodically updated rebalancing and pricing strategies, which were shown to be inadequate under highly volatile and event-driven demand patterns \parencite{guo2021robust, neijmeijer2020}. 
+
+To address this issue, recent studies have increasingly shifted toward continuous or event-triggered operational methods, in which control actions are updated in real time based on instantaneous system states or individual trip arrivals. For example, continuous and path-dependent rebalancing strategies allow idle ride-hailing vehicles to dynamically adjust their cruising behavior rather than waiting for the next planning cycle, substantially improving responsiveness to sudden demand surges \parencite{brar2025wise}. Similarly, real-time pricing frameworks formulate incentives as dynamic control signals using model predictive control, enabling demand regulation at a much finer temporal granularity than traditional tactical pricing schemes \parencite{yuan2021real, yuan2021learning}. 
+
+\section{Problem Statement}
+
+Given the limitations in temporal resolution and intervention precision mentioned above, the core challenge is not developing better rebalancing plans. It is how to effectively execute these plans in real-time, stochastic demand environments. Rebalancing models provide a global perspective by setting a macroscopic target state of vehicle distribution within a discrete planning period. However, they do not explicitly specify how to handle individual user travel requests arriving asynchronously and continuously, nor do they explain how to align incentive decisions with long-term system goals at the travel level.
+
+In addition, the execution of target inventory level from the rebalancing models is constrained by grid-level parking capacity. 
+In geo-fenced grid representations, each cell $i$ has a finite carrying capacity $C_i$, and the 
+total inventory across battery categories is bounded accordingly \parencite{momen2025}. 
+When a target cell is close to saturation, incentivizing additional arrivals can become infeasible 
+or even counterproductive, since capacity-full states directly contribute to expected demand loss 
+(e.g., rejected arrivals/drop-offs) in capacity-aware interval-based OR formulations \parencite{momen2025}. 
+As a result, a rebalancing relocation suggestion that is optimal at the beginning of a 15-minute window 
+may turn suboptimal within the window due to stochastic arrivals and local capacity saturation, 
+highlighting the need for trip-level execution decisions that selectively implement (or skip) 
+planned relocations in real time.
+
+Therefore, this thesis examines how to refine interval-level rebalancing references into selective, trip-level execution decisions under stochastic demand without altering the plan itself. Specifically, the problem lies in designing a mechanism to observe the evolving system state with fine temporal resolution. For each travel request received from upstream relocation guidance, the framework determines whether incentives should be issued to guide the system toward the rebalancing goal. Such decisions must be dualistic, budget-conscious, adaptable to local conditions, and consistent with the overall goals of the rebalancing plan.
+
+The key challenge lies in balancing short-term user acceptance with long-term strategic goal achievement under uncertainty, thereby bridging the gap between macro-planning and micro-execution in the shared electric scooter system.
+
+\section{Research Objective and Questions}
+
+\paragraph{Overall Objective}
+% To improve the real-time execution of tactical rebalancing plans in free-floating e-scooter systems under stochastic demand, with a focus on trip-level incentive triggering within a grid-based urban environment.
+
+% To improve trip-level execution performance and system service level in free-floating e-scooter systems under stochastic demand by designing a real-time incentive decision framework operating within a given tactical rebalancing context.
+
+To improve the real-time execution of interval-based rebalancing decisions in
+free-floating e-scooter systems under stochastic demand, this study designs an
+RL-based real-time refinement layer operating at the trip level.
+Integrating such a refinement layer should reduce
+network-level expected demand loss (EDL) and enhance the robustness of
+rebalancing execution against intra-interval demand fluctuations.
+
+% To develop a binary Reinforcement Learning framework that refines an existing hourly tactical rebalancing plan by making real-time, trip-level incentive decisions within a grid-based environment.
+
+\paragraph{Research Questions}
+\textbf{Main Research Question:}
+
+% How can tactical rebalancing plans be dynamically adapted to high-frequency stochastic demand through a trip-level incentive mechanism?
+
+How can a real-time, trip-level incentive decision framework improve system service level and operational performance in free-floating e-scooter systems under stochastic demand?
+
+
+% To what extent can a Binary Deep Reinforcement Learning framework enhance the operational efficacy of macro-level tactical plans in free-floating e-scooter systems through real-time execution intervention?
+
+\begin{enumerate}
+    
+%     \item \textbf{(RQ1 - Design)} What operational mismatches arise between interval-based target from the rebalancing models and real-time trip arrivals in free-floating e-scooter systems?
+    
+%     \item \textbf{(RQ2 - Decision Mechanism)} How can a real-time incentive-triggering mechanism be designed to bridge the gap between short-term user behavior and long-term tactical rebalancing objectives?
+    
+%     \item \textbf{(RQ3 - Performance Impact)} To what extent does a real-time execution mechanism improve service level and budget efficiency compared to tactical-only or fixed incentive strategies?
+
+% \end{enumerate}
+
+\item \textbf{(RQ1 -- Execution Mismatch Identification)}  
+What operational mismatches arise between interval-based targets from the rebalancing models and real-time trip arrivals in free-floating e-scooter systems?
+
+\item \textbf{(RQ2 -- Decision Mechanism)}  
+How should trip-level incentive decisions be structured, in terms of state representation and reward design, to improve system service level under stochastic demand?
+
+\item \textbf{(RQ3 -- Performance Evaluation)}  
+To what extent does the proposed real-time execution mechanism improve system service level and incentive efficiency compared to baseline strategies?
+
+\end{enumerate}
+
+% \section{Scope and Delimitations}
+
+% This thesis focuses on trip-level selective execution of interval-based relocation guidance in free-floating e-scooter systems under stochastic demand. The primary decision studied is whether to trigger a user incentive for a specific trip request, given real-time state information, budget considerations, and local capacity constraints.
+
+% The study does not redesign the upstream rebalancing model or replace the planning layer end-to-end. It also does not optimize operator truck-routing policies in parallel with trip-level incentive control. Empirical evaluation is conducted in a data-driven simulation environment calibrated to the case setting, so the reported findings emphasize methodological validity and comparative operational performance under controlled scenarios.
+
+\section{Research Contribution}
+This thesis proposes a Real-Time Refinement Layer to fill the gap above. We use a Binary Reinforcement Learning (RL) agent to execute the rebalancing plan with higher precision. The agent monitors the real-time grid state and makes binary decisions (Incentive/No Incentive) for each trip request according to the rebalancing plan. This approach combines the global perspective of rebalancing planning with the responsiveness of RL, navigating the trade-off between user acceptance and long-term service levels.
+
+Beyond its technical contributions, this framework has broader social and practical implications. By enabling more precise and targeted incentive allocation, this approach can reduce subsidy waste and improve service availability in underserved or volatile areas, thus contributing to the construction of more equitable and reliable urban mobility services. Furthermore, the concept of a real-time refinement layer is not limited to the micro-mobility field. It can be easily extended to other urban mobility and resource allocation fields, such as ride-hailing dispatch, shared bicycles, on-demand responsive public transportation, and energy-saving fleet management. In these fields, macro-level planning must be implemented through fine-grained real-time binary decision-making.
+
+\section{Thesis Structure}
+The remainder of the thesis is organized as follows. Chapter 2 reviews the literature on tactical rebalancing, service-level modeling, user incentive mechanisms, and reinforcement learning for operational control. Chapter 3 defines the research focus, system under study, decision hierarchy, formal problem, and scope of the thesis. Chapter 4 presents the methodology, including the event-driven simulation environment, the OR interface, the trip-level refinement problem, the RL formulation, and the reproducibility logic. Chapter 5 describes the experimental design, including baseline policies, scenario setup, performance metrics, evaluation procedure, and sensitivity analysis. Chapter 6 reports the empirical results, covering environment and interface validation, baseline performance, refinement-layer performance, and ablation results. Chapter 7 discusses the main findings, relates them to prior literature, and reflects on managerial implications, limitations, and future work. Chapter 8 concludes by answering the research questions and summarizing the scientific and practical implications of the study.
+
+This structure also mirrors the progression of the research questions. Chapter 2 establishes the literature basis for identifying the execution mismatch in RQ1, motivating the design choices behind RQ2, and defining the comparison dimensions relevant to RQ3. Chapter 3 translates these questions into a precise system boundary and research problem. Chapter 4 develops the methodological framework used to operationalize the trip-level refinement mechanism. Chapters 5 and 6 provide the experimental and empirical basis for evaluating whether the proposed mechanism improves service level and incentive efficiency. Chapters 7 and 8 then synthesize the findings into broader conclusions and implications.

@@ -37,6 +37,7 @@ class DecisionContext:
 class TransitionLogger:
     def __init__(self) -> None:
         self.rows: List[Dict[str, Any]] = []
+        self.trip_rows: List[Dict[str, Any]] = []
 
     def append(self, row: Dict[str, Any]) -> None:
         self.rows.append(row)
@@ -152,7 +153,9 @@ def _clip(x: float, lo: float, hi: float) -> float:
 
 
 def reward_hybrid(
-    reward_lambda: float,
+    w_l: float,
+    w_e: float,
+    beta_a: float,
     beta_c: float,
     beta_r: float,
     l_ref: float,
@@ -160,15 +163,26 @@ def reward_hybrid(
     realized_loss: float,
     delta_edl: float,
     cost_term: float,
+    accept_flag: bool,
     reject_flag: bool,
 ) -> float:
+    """
+    Hybrid reward with independently weighted primary terms.
+
+    Normalization anchors:
+      - l_ref: scale for realized-loss term
+      - e_ref: scale for delta-EDL term
+    They are numerical anchors (not physical constants) to keep terms
+    comparable and stable across settings.
+    """
     l_ref = max(1e-9, float(l_ref))
     e_ref = max(1e-9, float(e_ref))
     realized_norm = _clip(float(realized_loss) / l_ref, 0.0, 1.0)
     delta_edl_norm = _clip(float(delta_edl) / e_ref, -1.0, 1.0)
     return float(
-        float(reward_lambda) * (-realized_norm)
-        + (1.0 - float(reward_lambda)) * delta_edl_norm
+        -float(w_l) * realized_norm
+        + float(w_e) * delta_edl_norm
+        + float(beta_a) * (1.0 if accept_flag else 0.0)
         - float(beta_c) * float(cost_term)
         - float(beta_r) * (1.0 if reject_flag else 0.0)
     )
@@ -188,7 +202,9 @@ def reward_edl(
 ) -> float:
     delta_edl = (edl_before_d + edl_before_i) - (edl_after_d + edl_after_i)
     return reward_hybrid(
-        reward_lambda=0.0,
+        w_l=0.0,
+        w_e=1.0,
+        beta_a=0.0,
         beta_c=beta,
         beta_r=gamma,
         l_ref=1.0,
@@ -196,6 +212,7 @@ def reward_edl(
         realized_loss=0.0,
         delta_edl=alpha * delta_edl,
         cost_term=cost_term,
+        accept_flag=False,
         reject_flag=reject_flag,
     )
 

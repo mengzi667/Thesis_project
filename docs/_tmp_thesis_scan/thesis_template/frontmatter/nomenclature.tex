@@ -1,0 +1,43 @@
+\chapter*{Nomenclature}
+\addcontentsline{toc}{chapter}{Nomenclature}
+
+\emph{Core notation and abbreviations used in this thesis.}
+
+\section*{Abbreviations}
+
+\begin{longtable}{p{2.5cm}p{8cm}}
+    \toprule
+    Abbreviation & Definition \\
+    \midrule\endhead
+    OR & Operations Research (upstream interval-based rebalancing model) \\
+    RL & Reinforcement Learning \\
+    DDQN & Double Deep Q-Network \\
+    EDL & Expected Demand Loss \\
+    NB2 & Negative Binomial count model with \(\mathrm{Var}(N)=\mu+\phi\mu^2\) \\
+    KPI & Key Performance Indicator \\
+    \bottomrule
+\end{longtable}
+
+\section*{Symbols}
+
+\begin{longtable}{p{2.5cm}p{8cm}p{2.5cm}}
+    \toprule
+    Symbol & Definition & Unit \\
+    \midrule\endhead
+    \(i\) & Decision-step index in event-driven RL process & -- \\
+    \(\tau_i\) & Event time of decision step \(i\) & min \\
+    \(O_i,D_i,R_i\) & Origin, original destination, and recommended destination zones in decision step \(i\) & -- \\
+    \(a_i\) & RL action at decision step \(i\): offer/no-offer & -- \\
+    \(L_i\) & Realized no-supply loss in window \((\tau_i,\tau_{i+1}]\), restricted to \(O_i,D1_i,R_i\) & count \\
+    \(\Delta EDL_i\) & EDL difference (baseline minus realized) for decision step \(i\) & count \\
+    \(L_{ref}\) & Normalization anchor for \(L_i\) (sample-based, current P95 with lower bound) & count \\
+    \(E_{ref}\) & Normalization anchor for \(|\Delta EDL_i|\) (sample-based, current P95 with lower bound) & count \\
+    \(w_L,w_E\) & Independent weights for realized-loss and EDL terms & -- \\
+    \(Acc_i, Rej_i\) & Binary variables for accept and activated-but-not-accepted outcomes & -- \\
+    \(\beta_a,\beta_c,\beta_r\) & Acceptance weight, cost weight, rejection weight & -- \\
+    \(Cost_i\) & Realized incentive payout at decision step \(i\) & EUR \\
+    \(\omega_{odt}\) & Aggregated expected OD demand in slot \(t\) & trips/slot \\
+    \(\mu_{odt}\) & Simulator-side expected OD count after scaling & trips/slot \\
+    \(\phi_t\) & NB2 dispersion parameter at hour/slot level & -- \\
+    \bottomrule
+\end{longtable}

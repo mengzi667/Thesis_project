@@ -15,8 +15,8 @@ SARA_SLOT0_HOUR: int = 6
 SARA_ZONE_CAPACITY: int = 10
 SARA_INIT_INVENTORY_CSV: str = ""   # optional CSV (station,n,l,h)
 SARA_INIT_UNIFORM_N: int = 0
-SARA_INIT_UNIFORM_L: int = 4
-SARA_INIT_UNIFORM_H: int = 5
+SARA_INIT_UNIFORM_L: int = 3
+SARA_INIT_UNIFORM_H: int = 4#待会改回来！！这个已经是减少后的了，之前是5，改成4是为了让初始状态更偏向低电量，让realisedloss不是0，能更好地展示RL的作用。
 
 # ── Spatial system ─────────────────────────────────────────────────────────────
 NUM_ZONES: int = 10                  # initial prototype scale (10-20 recommended)

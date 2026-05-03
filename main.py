@@ -292,11 +292,12 @@ def build_simulation(
             is_weekend=int(SARA_IS_WEEKEND),
         )
         phi_source = phi_csv if phi_table else "global_fallback"
-        print(
-            "  Trip arrival   : "
-            f"{arrival_dist} | phi_mode={phi_mode} | phi_source={phi_source} | "
-            f"phi(min/p50/max)=({phi_series.min():.3f}/{phi_series.median():.3f}/{phi_series.max():.3f})"
-        )
+        if verbose:
+            print(
+                "  Trip arrival   : "
+                f"{arrival_dist} | phi_mode={phi_mode} | phi_source={phi_source} | "
+                f"phi(min/p50/max)=({phi_series.min():.3f}/{phi_series.median():.3f}/{phi_series.max():.3f})"
+            )
     elif source == "poisson":
         trip_gen = PoissonTripGenerator(
             zone_ids=spatial.all_zone_ids(),
@@ -380,7 +381,8 @@ def build_simulation(
     # 7. Metrics logger
     logger = MetricsLogger()
 
-    print(f"  OR source  : {or_source}")
+    if verbose:
+        print(f"  OR source  : {or_source}")
     return SimulationEngine(
         spatial=spatial,
         fleet=fleet,

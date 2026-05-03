@@ -1,10 +1,15 @@
 ﻿from __future__ import annotations
 
 from dataclasses import dataclass
+import os
 from typing import Dict, List, Tuple
 
 import numpy as np
 import pandas as pd
+
+
+def _path(data_dir: str, name: str) -> str:
+    return os.path.join(data_dir, name)
 
 
 def _enumerate_states(capacity: int) -> List[Tuple[int, int, int]]:
@@ -69,10 +74,10 @@ class SaraMarkovEDL:
         prob_l: float = 0.18,
         prob_h: float = 0.70,
     ) -> "SaraMarkovEDL":
-        pickup = pd.read_csv(f"{data_dir.rstrip('/\\')}/30sep-df_pickup_rates.csv")
-        dropoff = pd.read_csv(f"{data_dir.rstrip('/\\')}/30sep-df_power_dropoff_rates.csv")
-        phi1_df = pd.read_csv(f"{data_dir.rstrip('/\\')}/30sep-df_phi1.csv")
-        phi2_df = pd.read_csv(f"{data_dir.rstrip('/\\')}/30sep-df_phi2.csv")
+        pickup = pd.read_csv(_path(data_dir, "30sep-df_pickup_rates.csv"))
+        dropoff = pd.read_csv(_path(data_dir, "30sep-df_power_dropoff_rates.csv"))
+        phi1_df = pd.read_csv(_path(data_dir, "30sep-df_phi1.csv"))
+        phi2_df = pd.read_csv(_path(data_dir, "30sep-df_phi2.csv"))
 
         for df in (pickup, dropoff, phi1_df, phi2_df):
             for c in list(df.columns):

@@ -1,0 +1,250 @@
+\chapter{Experimental Design}
+
+This chapter defines the experimental protocol used in this thesis. The purpose is to evaluate whether a trip-level refinement layer can improve the execution quality of OR-guided relocation decisions under stochastic demand. To keep the comparison interpretable, the upstream OR plan is fixed and only downstream execution logic is changed.
+
+\paragraph{Placeholder Convention}
+Structured placeholders use angle-bracket tokens for later replacement, for example \texttt{\detokenize{<S1\_RL\_SERVICE\_RATE\_MEAN>}} and \texttt{\detokenize{<TAB\_S1\_FINAL>}}.
+
+\section{Evaluation Logic and Policy Comparison}
+
+The evaluation is designed around a layered-control perspective. The OR model provides interval-based relocation opportunities, while the refinement layer decides whether those opportunities should be activated for realized trip events. Under this setup, observed differences can be attributed to execution decisions rather than changes in planning itself.
+
+The policy comparison includes two fixed references and one learned policy in one unified evaluation run: \textit{no-offer}, \textit{always-offer}, and \textit{checkpoint}. Here \textit{checkpoint} denotes the learned RL policy loaded from the selected model checkpoint and executed greedily at evaluation time.
+In the current execution interface, \textit{always-offer} is used as the operational counterpart of OR-only execution, because OR suggestions are not suppressed at the trip-execution layer.
+
+\section{Shared Environment and Common Settings}
+
+All policies are evaluated in the same event-driven simulator, with the same OR input table, battery transition model, and user behavior module. A request enters the refinement decision boundary only when it matches a valid OR record and remains operationally feasible in the current state.
+
+The OR interface is represented by a standardized \(U_{odit}\) table, where each record specifies origin, original destination, recommended destination, planning slot, incentive value, and remaining execution quota. The refinement layer does not create new relocation targets and does not redesign OR outputs. It only decides whether a currently available OR recommendation should be activated.
+
+Each episode is defined as a two-hour horizon (\(120\) minutes), and planning slots are aligned to \(15\)-minute intervals for OR matching and EDL timing. Trips are processed in event time inside each episode.
+
+To keep terminology stable across chapters, this thesis uses three evaluation profiles: \textit{main}, \textit{sparse}, and \textit{dense}.  
+All three profiles share the same simulator logic, OR input structure, user-choice model, battery-transition model, and policy interface.  
+Their only difference is the demand-sampling intensity applied in simulator-side trip realization.
+
+The profile definitions are:
+\begin{itemize}
+\item \textbf{\textit{main}}: baseline profile used for model training and primary result reporting.
+\item \textbf{\textit{sparse}}: lower-demand stress profile used to test policy behavior under fewer matched opportunities.
+\item \textbf{\textit{dense}}: higher-demand stress profile used to test policy behavior under heavier event pressure.
+\end{itemize}
+
+In implementation, the three profiles are instantiated by different scaling settings on top of the same OD expectation source and NB2 arrival mechanism.  
+This means profile changes do not alter upstream OR optimization logic; they only change downstream realized trip exposure in the simulator.
+
+
+\subsection{Trip-Arrival Uncertainty Setting Used in This Chapter}
+
+Trip-arrival uncertainty follows the methodology introduced in Chapter~4. In this chapter, realized trips are generated from OD-slot expected demand using the NB2 setting (rather than pure Poisson), with hourly dispersion profile loading (\texttt{by\_hour} mode). OR inputs and OR optimization logic remain unchanged.
+
+When sampling-profile scaling is applied, it is used only in the simulator-side trip realization process for training/evaluation exposure control. It does not alter the fixed \(U_{odit}\) plan content. All scaling factors and uncertainty-mode settings are logged per run for reproducibility.
+The scaling follows the Chapter~4 formulation:
+\[
+\mu_{odt}^{(sim)}=\omega_{odt}\cdot s_g \cdot s_w(t)\cdot s_{od}(o,d,t),
+\]
+where \(s_g\) is the global demand multiplier, \(s_w(t)\) is the window multiplier, and \(s_{od}(o,d,t)\) is the OD-target multiplier.
+
+For this thesis version, profile mappings are fixed as:
+\begin{itemize}
+\item \textbf{\textit{sparse}}: \texttt{global\_scale=1.0}, \texttt{window\_scale=2.0}, \texttt{od\_target\_scale=5.0}
+\item \textbf{\textit{main}}: \texttt{global\_scale=1.5}, \texttt{window\_scale=4.0}, \texttt{od\_target\_scale=8.0}
+\item \textbf{\textit{dense}}: \texttt{global\_scale=1.8}, \texttt{window\_scale=5.0}, \texttt{od\_target\_scale=10.0}
+\end{itemize}
+The active time window is \texttt{slot 0--7}. The OD-target multiplier is applied only to the configured target OD subset. These profile settings change realized trip intensity only; they do not modify OR output, OR interface semantics, or OR planning logic.
+
+\section{Scenario 1: Binary Offer Activation}
+
+\subsection{Decision Scope}
+
+Scenario 1 uses a binary action space:
+\[
+a_i \in \{0,1\},
+\]
+where \(a_i=0\) suppresses relocation activation and \(a_i=1\) activates the fixed OR offer at decision step \(i\). The policy is called only at eligible OR-matched events with rentable supply at origin.
+
+In this scenario, scooter assignment remains deterministic (highest-battery-first), so the RL layer controls only activation and not vehicle selection.
+
+\subsection{State Representation}
+
+The Scenario 1 state is a compact execution-context vector defined at each eligible event. It includes: temporal position in the episode, origin/destination/recommended zone identifiers, battery-aware inventory composition at these zones, EDL-related local context, trip-offer attributes (ride-time difference, walking-time difference, incentive amount), and resource context (remaining quota and budget signal).
+
+This representation is intentionally scoped to the refinement boundary. It excludes planning-layer internals to preserve modularity between OR planning and RL execution.
+
+\subsection{User Behavior and Outcome Realization}
+
+User response is modeled as a single-layer discrete choice process. When no offer is activated, the feasible outcomes are \textit{base} or \textit{opt-out}. When an offer is activated, the feasible outcomes are \textit{offer}, \textit{base}, or \textit{opt-out}. The final realized action is sampled from utility-based probabilities.
+
+This design ensures that RL decides activation only, while final behavioral outcome remains stochastic and environment-driven.
+
+\begin{table}[H]
+\centering
+\caption{User model parameters used in this thesis experiments (Scenario 1).}
+\label{tab:user-model-params}
+\begin{tabular}{p{4.5cm}p{3.5cm}p{6.0cm}}
+\toprule
+\textbf{Parameter} & \textbf{Value} & \textbf{Meaning} \\
+\midrule
+\(\beta_{ES}\) & \(10.514\) & Alternative-specific constant component (shared as \(0.5\beta_{ES}\) in base/offer utility). \\
+\(\beta_{walk}\) & \(-0.342\) & Walking-time sensitivity. \\
+\(\beta_{unlock}\) & \(-1.419\) & Unlock-fee coefficient. \\
+\(\beta_{ride}\) & \(-25.147\) & Ride-cost coefficient. \\
+\(\beta_{batt}\) & \(0.27\) & Battery/range utility coefficient. \\
+\(\beta_{type}\) & \(-1.02\) & Vehicle-type attribute coefficient. \\
+\(\beta_{prev}\) & \(-1.79\) & Previous-use attribute coefficient. \\
+\(\beta_{bike}\) & \(-2.21\) & Bike-ownership attribute coefficient. \\
+\(\beta_{inc}\) & \(-1.18\) & Low-income attribute coefficient. \\
+\(\beta_{alone}\) & \(1.21\) & Living-alone attribute coefficient. \\
+\(\beta_{shared}\) & \(-0.86\) & Living-shared attribute coefficient. \\
+\(\eta_{att}\) & \(0.82\) & Environmental-attitude latent term coefficient. \\
+\(\eta_{range}\) & \(-0.58\) & Range-anxiety latent term coefficient. \\
+\midrule
+\(p_{ride}\) & \(0.30\) EUR/min & Ride-price constant in cost term \(c^{base},c^{offer}\). \\
+\(k_{range}\) & \(0.6\) km/\% & Battery-to-range conversion in \(r^{base},r^{offer}\). \\
+\(inc_i\) (fixed offer) & \(1.0\) EUR & Incentive amount used in offer alternative. \\
+\midrule
+\(\text{type}_{25}\) & \(1\) & Default user attribute in simulation. \\
+\(\text{prev\_use}\) & \(1\) & Default user attribute in simulation. \\
+\(\text{bike}\) & \(0\) & Default user attribute in simulation. \\
+\(\text{income\_low}\) & \(0\) & Default user attribute in simulation. \\
+\(\text{living\_alone}\) & \(0\) & Default user attribute in simulation. \\
+\(\text{living\_shared}\) & \(0\) & Default user attribute in simulation. \\
+\(\text{attitude}\) & \(0.0\) & Default user latent attribute in simulation. \\
+\(\text{range\_anxiety}\) & \(0.0\) & Default user latent attribute in simulation. \\
+\bottomrule
+\end{tabular}
+\end{table}
+The coefficient set follows the referenced behavioral-model literature \parencite{burghardt2025behavioral,momen2025}, while the experiment-specific constants/defaults are fixed to the current simulator configuration for reproducibility.
+
+\subsection{Reward Design}
+
+Scenario 1 uses a delayed hybrid reward:
+\[
+r_i
+=
+w_E\widetilde{\Delta EDL}_i
+-
+w_L\widetilde{L}_i
++
+\beta_a Acc_i
+-
+\beta_c Cost_i
+-
+\beta_r Rej_i.
+\]
+
+The normalized terms are:
+\[
+\widetilde{L}_i
+=
+\mathrm{clip}\!\left(\frac{L_i}{L_{ref}},0,1\right),\qquad
+\widetilde{\Delta EDL}_i
+=
+\mathrm{clip}\!\left(\frac{\Delta EDL_i}{E_{ref}},-1,1\right).
+\]
+
+Reward is finalized when the next relevant decision state is observed (or at episode end), so that both immediate and short-horizon downstream effects are reflected in the transition target. For \(L_i\), the realized-loss window is event-based: from decision step \(i\) to the next decision step (or episode end), and only no-supply losses in \(O_i\), \(D1_i\), and \(R_i\) are counted. In this setup, \(Acc_i\) and \(Rej_i\) are binary outcome variables for acceptance and activated-but-not-accepted cases, respectively, while incentive cost is accounted for realized acceptance events.
+
+The normalization anchors \(L_{ref}\) and \(E_{ref}\) are calibrated from decision-level samples across episodes (current setup: P95 with lower-bound guards). \(L_{ref}\) is estimated from the empirical distribution of \(L_i\), and \(E_{ref}\) from \(|\Delta EDL_i|\). They are numerical anchors for scale comparability and stability, not physical constants.
+
+\subsection{Final Training and Evaluation Protocol}
+
+This subsection defines the final protocol used to train and evaluate the Scenario~1 refinement policy.  
+The protocol is designed to keep policy comparison fair, preserve reproducibility, and clearly separate primary performance reporting from robustness testing.
+
+\paragraph{Step 1: Training profile and learning setup.}
+The RL policy is trained under the \textit{main} demand profile only.  
+Scenario~1 uses a binary action space, where the policy decides whether to activate or suppress an OR-matched offer at each eligible decision event.  
+Eligibility requires (i) a valid OR match in the current slot and (ii) rentable scooter availability at the origin zone.
+
+
+\paragraph{Step 2: Checkpoint selection.}
+During training, checkpoints are saved at fixed intervals and at the end of training.  
+The final model used for policy comparison is selected from this checkpoint sequence according to the predefined run protocol (same seed range and profile assumptions).  
+After selection, the checkpoint is frozen and reused across all evaluation profiles to avoid checkpoint-specific bias.
+
+\paragraph{Step 3: Three-profile evaluation.}
+The selected checkpoint is evaluated under three profiles:
+\begin{itemize}
+\item \textit{main}: primary reporting profile;
+\item \textit{sparse}: low-demand stress profile;
+\item \textit{dense}: high-demand stress profile.
+\end{itemize}
+
+All profile changes are applied only to simulator-side trip realization intensity.  
+The OR output structure and OR interface remain fixed across profiles.  
+Therefore, profile variation tests execution robustness under demand-shift conditions, not changes in planning logic.
+
+\paragraph{Step 4: Three-policy comparison in each profile.}
+Within each profile, three policies are evaluated side-by-side:
+\begin{itemize}
+\item \textit{no-offer}: always suppress activation at decision points;
+\item \textit{always-offer}: always activate the available OR offer;
+\item \textit{checkpoint}: greedy execution of the trained RL policy.
+\end{itemize}
+
+All three policies are run with identical environment settings and aligned seed schedules inside the same profile.  
+This ensures that observed differences can be attributed to policy behavior rather than uncontrolled stochastic drift.
+
+\paragraph{Step 5: Seed split and reproducibility control.}
+Training and evaluation seed ranges are separated.  
+Each run logs the seed range, profile parameters, OR input reference, reward coefficients, and checkpoint path.  
+Episode-level and transition-level outputs are persisted for audit and post-hoc diagnostics.
+
+\paragraph{Step 6: Reporting order and interpretation.}
+Results are interpreted in two layers:
+\begin{enumerate}
+\item \textbf{Primary conclusion:} policy comparison under the \textit{main} profile.
+\item \textbf{Robustness conclusion:} performance shifts under \textit{sparse} and \textit{dense} profiles using the same frozen checkpoint.
+\end{enumerate}
+
+This order prevents robustness stress tests from being confused with main performance claims, while still showing how sensitive the learned policy is to demand-density changes.
+
+
+
+\section{Scenario 2: Joint Offer-Option Refinement (Placeholder)}
+
+\subsection{Decision Scope and Action Space (Placeholder)}
+
+\textit{Planned extension: the RL action will no longer be restricted to binary activation, but may jointly decide whether to activate an offer and which offer option to present (e.g., vehicle or battery-class-linked option).}
+
+\subsection{State and User-Choice Coupling (Placeholder)}
+
+\textit{Planned extension: the state will include richer option-level context (candidate vehicles, battery classes, and option attributes), and user choice will be explicitly coupled to the offered option set.}
+
+\subsection{Reward and Constraint Design (Placeholder)}
+
+\textit{Planned extension: reward remains service-loss and EDL oriented, while adding option-feasibility, battery-related, and budget/quota constraint handling at the option level.}
+
+\subsection{Training and Evaluation Protocol (Placeholder)}
+
+\textit{Planned extension: Scenario 2 will require a redefined action space, revised baselines, and dedicated evaluation tables. No Scenario 2 numerical results are reported in this thesis stage.}
+
+\section{Metrics and Reporting Protocol}
+
+The reporting framework combines operational KPIs and reward-decomposition diagnostics.
+
+\textbf{Primary policy-comparison KPIs} include service rate, unserved requests (including no-supply cases), relocation offers, accepted relocations, and acceptance rate.
+
+\textbf{Reward diagnostics} include total reward and component-level signals in mean form, with aggregate sums reported for key terms when needed: \texttt{reward\_realized\_term}, \texttt{reward\_edl\_term}, \texttt{reward\_accept\_term}, \texttt{realized\_loss}, and \(\Delta EDL\).
+
+This dual reporting design is used for both training diagnostics and final policy comparison, so that behavioral and system-level effects can be interpreted consistently.
+
+\section{Data Split, Seed Control, and Reproducibility}
+
+Training and evaluation seed ranges are separated. OR input remains fixed within each experiment group. Demand-profile settings (including uncertainty mode and scaling profile) used in each run are explicitly logged. Checkpoints, episode-level metrics, and transition-level records are persisted for reproducibility and audit.
+
+These controls ensure that cross-policy differences can be traced to policy behavior rather than hidden configuration drift.
+
+\section{Sensitivity and Robustness Plan}
+
+After fixing the main Scenario~1 configuration, sensitivity analysis is conducted as a robustness check: key parameters around the reference setup (reward coefficients, normalization anchors, selected learning settings, and demand-scaling settings) are perturbed using short-run screening followed by longer confirmation runs for promising candidates under the same three-profile protocol (\textit{sparse}, \textit{main}, \textit{dense}) and aligned seed schedules. The objective is to verify that conclusions are stable and reproducible under plausible variations rather than tied to a single run configuration.
+
+\section{Implementation Notes}
+
+The experimental pipeline is implemented through the simulation framework and dedicated RL entry points (\texttt{python -m rl.train}, \texttt{python -m rl.evaluate}). Run metadata stores the key hyperparameters, seed schedule, profile settings, and checkpoint lineage.
+
+\section{Chapter Summary}
+
+This chapter has defined the shared experimental foundation and fully specified Scenario 1. It also reserves the complete structural position of Scenario 2 for later expansion. The next chapter reports empirical results under this protocol.

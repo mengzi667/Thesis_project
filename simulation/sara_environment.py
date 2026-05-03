@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import os
 from typing import Dict, List, Tuple
 
 import h3
@@ -11,7 +12,7 @@ from simulation.trip_generator import DemandProfile
 
 
 def _path(data_dir: str, name: str) -> str:
-    return f"{data_dir.rstrip('/\\')}/{name}"
+    return os.path.join(data_dir, name)
 
 
 def build_sara_spatial_system(

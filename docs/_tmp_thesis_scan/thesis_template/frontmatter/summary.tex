@@ -1,0 +1,12 @@
+\chapter*{Summary}
+\addcontentsline{toc}{chapter}{Summary}
+
+This thesis studies a real-time trip-level refinement layer for shared e-scooter rebalancing execution under stochastic demand. The motivation is a persistent planning--execution gap: upstream optimization generates interval-based relocation guidance, while realized passenger arrivals are event-driven and uncertain. As a result, direct execution of interval plans can be suboptimal at trip level.
+
+The proposed framework keeps the upstream OR plan fixed and adds a downstream binary execution policy that decides whether an OR-matched relocation offer should be activated for each eligible trip event. The simulator is event-driven and battery-aware, with zone-level capacity constraints, scooter-level state transitions, and a single-layer user choice model. Demand is generated from aggregated OD expectations using a Negative Binomial (NB2) arrival model with hour-level dispersion profiles, while OR inputs remain unchanged.
+
+The reinforcement learning layer is implemented with DDQN in Scenario~1, where action space is \{offer, no-offer\}. Reward is delayed and decision-indexed, combining (i) realized no-supply loss over the decision window, (ii) expected demand-loss improvement over look-ahead horizon, (iii) acceptance-related signal, and (iv) incentive cost and rejection penalty. Normalization anchors are calibrated from decision-level samples to maintain scale stability.
+
+Experiments are structured around reproducible seed splits and three-policy side-by-side evaluation: always-offer, no-offer, and learned-checkpoint policy. The protocol reports both operational KPIs and reward decomposition metrics, enabling interpretation of service outcomes, incentive activity, and EDL-related effects under matched conditions.
+
+At the current stage, Scenario~1 pipeline and evaluation structure are complete; Scenario~2 is reserved as future extension. The main contribution of this thesis is a modular and reproducible execution-layer methodology that refines fixed OR guidance at trip level without redesigning the upstream planning model.

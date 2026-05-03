@@ -85,7 +85,7 @@ class SimulationEngine:
         self.rl_policy = rl_policy
         self.rl_feature_builder = rl_feature_builder
         self.rl_transition_logger = rl_transition_logger
-        self.rl_reward_cfg = rl_reward_cfg or {"reward_lambda": 0.7, "beta_c": 1.0, "beta_r": 0.1, "l_ref": 1.0, "e_ref": 1.0}
+        self.rl_reward_cfg = rl_reward_cfg or {"w_l": 0.5, "w_e": 0.5, "beta_a": 0.2, "beta_c": 0.3, "beta_r": 0.02, "l_ref": 1.0, "e_ref": 1.0}
         self.episode_minutes = float(episode_minutes)
         self.budget_remaining = float(budget_remaining)
         self.zone_ids = sorted(self.spatial.all_zone_ids())
@@ -96,9 +96,8 @@ class SimulationEngine:
         self.print_snapshots = bool(print_snapshots)
         self._current_time: float = 0.0
         # Delayed reward bookkeeping (Rina-style):
-        # accumulate realized loss between two RL decision points.
+        # realized loss is finalized between two RL decision points.
         self._pending_rl_transition: Optional[dict] = None
-        self._pending_realized_loss: float = 0.0
 
     @property
     def current_time(self) -> float:
@@ -114,7 +113,6 @@ class SimulationEngine:
         trips = self.trip_gen.generate_trips(sim_duration)
         next_snapshot = self.snapshot_interval
         self._pending_rl_transition = None
-        self._pending_realized_loss = 0.0
 
         for trip in trips:
             self._current_time = trip.request_time
@@ -214,7 +212,6 @@ class SimulationEngine:
                     chosen=None, effective_dest=effective_dest,
                     outcome=UNSERVED_NO_SUPPLY,
                 )
-            self._record_realized_loss(1.0)
             return
 
         # ── Step 4 (cont.): compute trip/offer attributes ────────────────────
@@ -362,7 +359,6 @@ class SimulationEngine:
                     chosen=None, effective_dest=effective_dest,
                     outcome=UNSERVED_NO_SUPPLY,
                 )
-            self._record_realized_loss(1.0)
             return
 
         # ── Step 5 (cont.): Pickup ───────────────────────────────────────────
@@ -520,38 +516,47 @@ class SimulationEngine:
             "actual_cum_edl": float(actual_cum_edl),
             "cost_term": float(cost_term),
             "state": rl_state.astype("float32"),
+            # Window-loss accounting baseline:
+            # count no-supply events after this trip and before next decision.
+            "trip_record_start_idx": int(len(self.logger.trip_records)),
+            "relevant_zones": (
+                int(trip.origin_zone),
+                int(trip.destination_zone),
+                int(reloc_opp.recommended_dest),
+            ),
         }
-        self._pending_realized_loss = 0.0
-
-    def _record_realized_loss(self, value: float) -> None:
-        if self._pending_rl_transition is None:
-            return
-        self._pending_realized_loss += float(max(0.0, value))
 
     def _finalize_pending_transition(self, next_state, done: float) -> None:
         if self._pending_rl_transition is None or self.rl_transition_logger is None:
             return
         p = self._pending_rl_transition
-        realized_loss = float(self._pending_realized_loss)
+        realized_loss = float(self._window_realized_loss(p))
         delta_edl = float(p["delta_edl"])
         cost_term = float(p["cost_term"])
         reject_flag = bool(p["reject_flag"])
-        reward_lambda = float(self.rl_reward_cfg.get("reward_lambda", 0.7))
+        accept_flag = bool(p["accepted"])
+        w_l = float(self.rl_reward_cfg.get("w_l", 0.5))
+        w_e = float(self.rl_reward_cfg.get("w_e", 0.5))
+        beta_a = float(self.rl_reward_cfg.get("beta_a", 0.0))
         l_ref = max(1e-9, float(self.rl_reward_cfg.get("l_ref", 1.0)))
         e_ref = max(1e-9, float(self.rl_reward_cfg.get("e_ref", 1.0)))
         realized_norm = min(max(realized_loss / l_ref, 0.0), 1.0)
         delta_edl_norm = min(max(delta_edl / e_ref, -1.0), 1.0)
-        reward_realized_term = reward_lambda * (-realized_norm)
-        reward_edl_term = (1.0 - reward_lambda) * delta_edl_norm
+        reward_realized_term = -w_l * realized_norm
+        reward_edl_term = w_e * delta_edl_norm
+        reward_accept_term = beta_a * (1.0 if accept_flag else 0.0)
         reward = reward_hybrid(
-            reward_lambda=reward_lambda,
-            beta_c=float(self.rl_reward_cfg.get("beta_c", 1.0)),
-            beta_r=float(self.rl_reward_cfg.get("beta_r", 0.1)),
+            w_l=w_l,
+            w_e=w_e,
+            beta_a=beta_a,
+            beta_c=float(self.rl_reward_cfg.get("beta_c", 0.3)),
+            beta_r=float(self.rl_reward_cfg.get("beta_r", 0.02)),
             l_ref=l_ref,
             e_ref=e_ref,
             realized_loss=realized_loss,
             delta_edl=delta_edl,
             cost_term=cost_term,
+            accept_flag=accept_flag,
             reject_flag=reject_flag,
         )
         self.rl_transition_logger.append(
@@ -572,6 +577,7 @@ class SimulationEngine:
                 "cost_term": float(cost_term),
                 "reward_realized_term": float(reward_realized_term),
                 "reward_edl_term": float(reward_edl_term),
+                "reward_accept_term": float(reward_accept_term),
                 "reward": float(reward),
                 "done": float(done),
                 "state": p["state"],
@@ -579,7 +585,24 @@ class SimulationEngine:
             }
         )
         self._pending_rl_transition = None
-        self._pending_realized_loss = 0.0
+
+    def _window_realized_loss(self, pending: dict) -> float:
+        """
+        O + D1 + D2 joint realized-loss accounting.
+        Count no-supply trip losses between two decision points, restricted to
+        requests whose origin is in {origin, destination, recommended_dest}.
+        """
+        start_idx = int(pending.get("trip_record_start_idx", len(self.logger.trip_records)))
+        relevant = set(int(z) for z in pending.get("relevant_zones", ()))
+        if not relevant:
+            return 0.0
+        loss = 0.0
+        for rec in self.logger.trip_records[start_idx:]:
+            if rec.unserved_reason != UNSERVED_NO_SUPPLY:
+                continue
+            if int(rec.origin_zone) in relevant:
+                loss += 1.0
+        return float(loss)
 
     # ── Output helpers ────────────────────────────────────────────────────────
 

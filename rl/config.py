@@ -26,11 +26,13 @@ class RLConfig:
     planning_period: float = 15.0
 
     # Hybrid reward coefficients
-    # r = lambda*(-clip(L_real/L_ref,0,1)) + (1-lambda)*clip(DeltaEDL/E_ref,-1,1)
-    #     - beta_c*cost - beta_r*1_reject
-    reward_lambda: float = 0.7
-    beta_c: float = 1.0
-    beta_r: float = 0.1
+    # r = -w_l*clip(L_real/L_ref,0,1) + w_e*clip(DeltaEDL/E_ref,-1,1)
+    #     + beta_a*1_accept - beta_c*cost - beta_r*1_reject
+    w_l: float = 0.5
+    w_e: float = 0.5
+    beta_a: float = 0.2
+    beta_c: float = 0.3
+    beta_r: float = 0.02
     l_ref: float = 1.0
     e_ref: float = 1.0
 
@@ -53,13 +55,13 @@ class RLConfig:
     epsilon_decay_steps: int = 15_000
 
     # Net
-    hidden_dim: int = 128
-    # hidden_dim: int = 64
+    hidden_dim: int = 64
+    # hidden_dim: int = 128
     # hidden_dim: int = 32
 
     # Experiment
-    train_episodes: int = 2000
-    eval_episodes: int = 200
+    train_episodes: int = 180
+    eval_episodes: int = 100
     seed_start_train: int = 11000
     seed_start_eval: int = 21000
 
@@ -81,6 +83,11 @@ class RLConfig:
     omega_nb_phi_csv: str = str(OMEGA_NB_PHI_CSV)
     omega_nb_phi_min: float = float(OMEGA_NB_PHI_MIN)
     omega_nb_phi_max: float = float(OMEGA_NB_PHI_MAX)
+
+    # Training I/O/early-stop controls
+    transition_dump_every: int = 20
+    early_stop_episode: int | None = None
+    early_stop_min_offers: float | None = None
 
     def train_seeds(self) -> List[int]:
         return [self.seed_start_train + i for i in range(self.train_episodes)]

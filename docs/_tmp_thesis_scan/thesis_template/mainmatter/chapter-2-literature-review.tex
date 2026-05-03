@@ -1,0 +1,127 @@
+\chapter{Literature Review}
+\label{chapter:literature-review}
+
+\section{Purpose and Scope}
+
+This chapter reviews the literature most directly related to the research objective of this thesis: improving trip-level execution of interval-based rebalancing guidance under stochastic demand in shared micromobility systems. 
+
+The scope is organized around four connected streams: (i) tactical optimization and static rebalancing, (ii) reinforcement learning for high-frequency operational control, (iii) algorithmic choices for discrete decision stability, and (iv) user incentive mechanisms for behavioral rebalancing. The chapter closes with a scientific-gap synthesis and a structured literature conclusion that maps key references to their methods and practical limitations for this thesis context.
+
+\section{Refining Literature Selection}
+
+The review follows a focused, problem-oriented selection strategy. Literature was primarily screened through Scopus, Web of Science, and Google Scholar, with backward/forward snowballing from highly relevant papers. The search combines domain keywords (e.g., shared mobility, micromobility, e-scooter, bike-sharing, rebalancing, incentives) and method keywords (e.g., robust optimization, reinforcement learning, DDQN, PPO, posted-price, bidding, hybrid rebalancing).
+
+Inclusion criteria were: (i) direct relevance to rebalancing execution, incentive control, or algorithmic decision design under uncertainty, (ii) clear methodological description and evaluable setup, and (iii) conceptual transferability to trip-level execution in shared micromobility. Exclusion criteria were: (i) studies focused only on high-level policy without operational decision logic, (ii) papers lacking sufficient method transparency, and (iii) works with limited relevance to stochastic demand-response operations. Most evidence is drawn from recent studies, while seminal RL foundations are retained to justify algorithmic choices.
+
+\section{Tactical Optimization and Static Rebalancing}
+% Optimization-based methods have long been the standard for rebalancing. \textcite{chiariotti2020} proposed a framework using Birth-Death processes to model station occupancy and predict downtimes, using incentives as a first line of defense before deploying trucks. Similarly, \textcite{bogyrbayeva2022} utilized a centralized controller for nightly static rebalancing of electric vehicles. While these models provide robust global blueprints, they suffer from latency due to time discretizations. \textcite{liang2025} recently highlighted that such discretization errors significantly impact rebalancing efficiency in dynamic environments.
+
+Tactical optimization and static (often nightly) rebalancing have long been the standard of shared-mobility operations due to their global view and feasibility guarantees. Recent surveys further categorize these methods by (i) decision level (strategic/tactical/operational), and (ii) uncertainty handling (deterministic vs. stochastic/robust/data-driven), highlighting that interval-level rebalancing guidance is typically computed on coarse time grids to maintain tractability \parencite{gao2025uncertainties}.
+
+Early integrated frameworks already combined optimization with incentives: \textcite{chiariotti2020} proposed a joint optimization that uses incentives as a first-line intervention, supported by a stochastic (Birth--Death) occupancy model to predict downtimes before truck actions are triggered. For electric vehicle fleets, \textcite{bogyrbayeva2022} adopted a centralized controller for nightly static rebalancing, where charging feasibility can be embedded into the global plan. Beyond deterministic planning, robust and distributionally robust formulations have been increasingly used to deal with demand uncertainty, especially for free-floating systems where station constraints decrease but uncertainty increases \parencite{chen2024optimizing}. 
+
+Despite producing robust global plans, tactical/static optimization suffers from temporal discretization latency: the plan is computed for a time window (e.g., 15--60 minutes) and cannot react to stochastic fluctuations within one window. Empirical and recent methodological work suggests that discretization errors and delayed execution can significantly degrade rebalancing efficiency in dynamic settings \parencite{liang2025}. 
+
+This motivates an additional execution layer at a finer time scale.
+
+
+\section{RL Applications for Supply and Demand Operations of Shared Mobility}
+% To address dynamism, Deep RL has been applied to learn policies from scratch ("end-to-end"). \textcite{wen2017} pioneered the use of Deep Q-Networks (DQN) in a grid-based system to rebalance vehicles without complex modeling. \textcite{pan2019} developed a hierarchical RL framework (HRP) to handle the dimensionality of city-wide networks. \textcite{ren2020} applied DDPG with a double-reward mechanism for car-sharing. However, these approaches often require immense training data and can be unstable. \textcite{schofield2024} proved that over-complicated state spaces in end-to-end RL does harm to learning, suggesting that a concise state representation is crucial. Furthermore, \textcite{papadis2023} noted in a related network resource problem that pure RL can struggle with execution latency, suggesting the need for predictive state estimates.
+
+% Apart from Pure RL, data mining approaches also exist. \textcite{cipriano2021} used association rule mining to predict critical station patterns. While interpretable, such rule-based methods lack the forward-looking capability to optimize long-term rewards, which is a core strength of RL.
+
+% RL Algorithms:
+% To be further investigated...
+
+Reinforcement learning (RL) has been widely explored as an alternative for operational control under high-frequency stochasticity. Current research often groups RL approaches by (i) value-based vs. policy-gradient/actor--critic, (ii) centralized vs. multi-agent, and (iii) end-to-end learning vs. hybrid integration with optimization/forecasting modules \parencite{gao2025uncertainties}.
+
+Early works studied end-to-end rebalancing policies in discretized urban grids: \textcite{wen2017} pioneered Deep Q-Networks (DQN) for vehicle repositioning without explicit optimization modeling. To scale to city-wide networks, hierarchical and multi-agent variants were proposed (e.g., HRP in \textcite{pan2019}), and continuous-control actor--critic methods (e.g., DDPG) were explored for car-sharing rebalancing with tailored reward shaping \parencite{ren2020}. More recently, RL has also been applied to incentive and pricing decisions in micromobility, especially e-scooter settings, exploring dynamic price or incentive offers to influence user decisions \parencite{yun2024price, losapio2022smart}. \textcite{cheng2025real} propose a deep reinforcement learning–based dual-control framework that jointly learns order dispatching and idle fleet steering policies for on-demand meal delivery platforms. Their framework models both operational decisions as Markov Decision Processes and trains policies in a simulated environment with demand prediction inputs. Meanwhile, some studies benchmark RL against multi-period MIP baselines and emphasize real-time deployment feasibility once training is completed \parencite{liang2024reinforcement}.
+
+End-to-end RL often requires a large amount of training data and is sensitive to simulation fidelity and reward setting. In addition, overly complicated state representations can harm learning stability and sample efficiency, suggesting that concise, structured state design is crucial \parencite{schofield2024}. Another recurring issue is execution latency: purely reactive RL may lag behind real demand when it lacks predictive cues or rebalancing guidance, motivating the integration of predictive state estimates or priors \parencite{papadis2023}. Finally, many RL studies optimize operational decisions in isolation, under-utilizing available tactical knowledge (targets, budgets, inventory goals) that operators already compute.
+
+This thesis positions RL as a real-time execution refiner instead of an end-to-end replacement.
+
+\section{RL Algorithms}
+Existing RL methods are broadly categorized into value-based and policy-gradient approaches, each offering distinct advantages depending on the structure of the action space and learning environment \parencite{sutton1998reinforcement}.
+
+Value-based methods, most notably Deep Q-Networks (DQN), have shown strong capability in learning control policies directly from high-dimensional state without requiring explicit system models \parencite{mnih2015human}. Their compatibility with discrete action spaces makes them attractive for transportation operations, where decisions often take the form of binary triggers. However, later research identified a critical limitation of DQN: the tendency to overestimate action values due to the maximization step in Q-learning. This overestimation bias can lead to unstable policies and degraded performance, especially in stochastic environments. To address this issue, Double Q-learning was introduced and later extended to Deep Reinforcement Learning as Double DQN (DDQN), which decouples action selection from action evaluation and thereby produces more reliable value estimates \parencite{van2016deep}. Evidence shows that DDQN improves training stability and reduces value inflation compared to vanilla DQN. Enhancements such as the dueling network further refine value-based learning by separately estimating state values and action advantages, improving policy evaluation when many actions yield similar outcomes \parencite{wang2016dueling}. Meanwhile, policy-gradient methods such as Proximal Policy Optimization (PPO) have gained popularity due to their stable policy updates and strong empirical performance in large-scale control tasks \parencite{schulman2017proximal}.
+
+Despite these advances, many previous studies adopt RL in an end-to-end way, requiring the agent to learn system dynamics and operational targets simultaneously. Such approaches often demand a large amount of training data and may overlook knowledge that is already available from upstream rebalancing models. Moreover, policy-gradient methods typically work well in continuous or high-dimensional action spaces, whereas they show less advantages in low-dimensional discrete settings.
+
+Given the binary nature of the incentive decision and the need for stable learning under stochastic demand, DDQN is a well-matched methodological choice. Its improved value estimation supports robust decision-making while maintaining the simplicity and interpretability of discrete policies. Rather than replacing rebalancing optimization, this study chooses DDQN as a real-time refinement layer that accepts target inventory level from the rebalancing models as priors. This hybrid design reduces policy complexity, accelerates convergence, and enhances the ability to respond to intra-period demand fluctuations without requiring repeated large-scale re-optimization.
+
+\section{User Incentive Mechanisms for the Demand Management of Shared Mobility}
+% Incentive mechanisms are generally divided into \textit{Bidding models} and \textit{Posted-price models}. \textcite{cheng2021} proposed a bidding mechanism (BIM) where users reveal their costs, arguing it is more budget-efficient. However, \textcite{neijmeijer2020} conducted real-world experiments (Living Lab) proving that simple posted-price incentives (e.g., fixed discounts) are sufficient to influence user behavior in free-floating systems. \textcite{duan2019} further emphasized the importance of "Destination Incentives", showing that guiding users to specific drop-off locations is highly effective. Based on these findings, this study adopts a binary posted-price model for operational simplicity and user acceptance.
+
+User incentives are a key part of demand management, especially for free-floating systems where operator-based relocation alone is expensive. A common survey classification separates incentives into (i) bidding / market-based mechanisms and (ii) posted-price mechanisms, and further by whether incentives target pick-up, drop-off, or both (two-stage) \parencite{gao2025uncertainties}.
+
+In bidding models, users reveal their private costs and the platform allocates the budget efficiently; \textcite{cheng2021} proposed a bidding incentive mechanism (BIM) for free-floating bike sharing. Optimization models have also integrated incentive allocation with static rebalancing decisions to improve service levels under budget constraints \parencite{li2021static}. In posted-price models, the operator offers simple discounts or coupons. Real-world experiments suggest that posted-price incentives can be sufficiently effective and operationally attractive due to transparency and low friction \parencite{neijmeijer2020}. For mechanism design, destination-oriented incentives have been shown to be particularly effective in shifting the spatial distribution of vehicles \parencite{duan2019}. More recent studies expand single-step incentives to two-stage mechanisms (pick-up and drop-off) and integrated operator/user-based hybrid rebalancing \parencite{wang2021two, emami2024integrated}.
+
+Bidding mechanisms may be budget efficient but introduce interaction complexity and potential strategic behavior, which can slow down operational execution and limit user acceptance. Posted-price mechanisms are simpler but must be carefully adapted to real-time state to avoid wasting budget on low-impact offers. Many existing incentive studies either (i) optimize incentives in coarse rebalancing intervals or (ii) learn incentives end-to-end without using targets and budget signals from rebalancing models as priors.
+
+We therefore adopt posted-price incentives and focus on real-time triggering.
+
+\section{Scientific Gap}
+% Current literature lacks a "Bridging Framework" that uses RL specifically as a real-time refiner for grid-based tactical plans. Most studies are either purely tactical (high latency) or purely RL (ignoring tactical knowledge). There is limited research on using a real-time binary decision RL agent to bridge the temporal granularity gap, utilizing Markovian prior knowledge (from tactical models) to accelerate training and improve robustness against intra-period stochasticity.
+
+The reviewed literature highlights a structural challenge in shared micromobility operations: aligning system wide planning with high frequency operational execution. While great progress has been made across optimization, reinforcement learning, algorithm design, and incentive mechanisms, these research directions largely evolve in parallel rather than as an integrated control framework.
+
+Rebalancing optimization models provide global plans that improve fleet balance and resource utilization. However, their reliance on discretized planning horizons limits responsiveness to rapid demand fluctuations, often causing mismatches within each planning window. Reinforcement learning has emerged as an alternative for real-time adaptation, enabling policies that respond to stochastic environments. Nevertheless, many existing studies use end-to-end learning methods that require the agent to simultaneously infer system dynamics, operational objectives, and control strategies. Such approaches demand a large amount of training data and may overlook operational knowledge already embedded in rebalancing plans. At the algorithmic level, advances such as Double Deep Q-Networks (DDQN) have improved training stability by mitigating value overestimation. This makes value-based learning more reliable for discrete operational decisions. Yet, these improvements mainly address learning behavior rather than the question of how RL should interact with higher-level planning layers. Meanwhile, research on user incentive mechanisms proves that simple operational methods, such as posted-price rewards, can effectively influence spatial demand distribution. Despite their practicality, these mechanisms are commonly optimized either within coarse rebalancing intervals or through independent learning frameworks. This constrains the role they can play in a hierarchical control architecture.
+
+Taken together, the literature reveals a tension between global optimality and real-time adaptability. Optimization-driven approaches work well in strategic coordination but lack execution flexibility, whereas RL-based methods achieve responsiveness but often operate without global guidance. Algorithmic advancements improve learning stability, and incentive mechanisms enhance behavioral control. However, a cohesive framework that connects these elements remains absent.
+
+To address this gap, this research proposes a Real-Time Refinement Layer using Double Deep Q-Networks (DDQN). Rather than replacing rebalancing optimization, the proposed agent uses targets from interval-based rebalancing models as priors and focuses on high-frequency execution. By synchronizing global planning with adaptive control, the framework bridges the temporal granularity gap and improves operational accuracy without requiring repeated large-scale re-optimization.
+
+\section{Literature Review Conclusion}
+
+In summary, prior research provides strong building blocks for rebalancing optimization, RL-based operational control, and incentive mechanism design, but these streams are often developed separately. Table~\ref{tab:lr-summary} synthesizes the key references discussed in this chapter and highlights how their methods and limitations motivate the proposed real-time refinement-layer approach.
+
+\begin{table}[p]
+\centering
+\scriptsize
+\setlength{\tabcolsep}{4pt}
+\caption{Grouped summary of key literature reviewed in this chapter.}
+\label{tab:lr-summary}
+\begin{tabularx}{\textwidth}{>{\raggedright\arraybackslash}p{2.2cm}>{\raggedright\arraybackslash}X>{\raggedright\arraybackslash}p{3.0cm}>{\raggedright\arraybackslash}X}
+\toprule
+\textbf{Reference} & \textbf{Brief research focus} & \textbf{Method used} & \textbf{Main limitation for this thesis context} \\
+\midrule
+\multicolumn{4}{l}{\textbf{A. Tactical Optimization and Uncertainty-Aware Rebalancing}} \\
+\midrule
+\textcite{gao2025uncertainties} & Survey of uncertainty-aware rebalancing and incentive approaches in shared mobility & Structured literature taxonomy (decision levels, uncertainty handling, incentive types) & Provides classification and trends, but not an executable trip-level control framework \\
+\textcite{momen2025} & Capacity-aware stochastic optimization for shared e-scooter rebalancing with battery states & OR model with birth--death process, battery-state transitions, and expected demand loss & Strong global planning but weak responsiveness to intra-interval demand shocks \\
+\textcite{chen2024optimizing} & Robust and distributionally robust rebalancing under demand uncertainty & Robust optimization / DRO formulations & Improves uncertainty handling at planning level, but still coarse in execution time granularity \\
+\textcite{liang2025} & Impact of discretization and delayed execution on rebalancing performance & Empirical and methodological analysis of discretized planning & Diagnoses temporal-latency issue but does not provide a unified trip-level execution policy \\
+\midrule
+\multicolumn{4}{l}{\textbf{B. RL Applications for Operational Execution}} \\
+\midrule
+\textcite{wen2017} & Early end-to-end RL for vehicle repositioning in grids & DQN-based rebalancing policy learning & End-to-end learning burden is high; limited use of upstream planning priors \\
+\textcite{pan2019} & Scaling RL rebalancing to large urban networks & Hierarchical RL (HRP) & Better scalability, but policy complexity and training requirements remain substantial \\
+\textcite{ren2020} & RL for car-sharing relocation with tailored incentives/rewards & DDPG with reward shaping & Sensitive to reward design and simulator assumptions; less aligned with binary discrete triggers \\
+\textcite{schofield2024} & Effect of state-space design on RL stability and sample efficiency & Comparative RL analysis with varying state representations & Shows the problem of over-complex states, but does not specify a refinement-layer interface to rebalancing models \\
+\textcite{papadis2023} & Execution latency and predictive cues in RL control settings & RL-based control analysis in related resource networks & Highlights latency issues, but transfer to micromobility execution still requires tailored design \\
+\textcite{cheng2025real} & Joint learning of dispatching and idle fleet steering in on-demand services & Dual-control deep RL framework with simulated training & Multi-decision architecture is effective but relatively complex for binary incentive triggering \\
+\textcite{liang2024reinforcement} & RL deployment feasibility versus multi-period optimization baselines & RL vs. MIP benchmark evaluation & Demonstrates deployment potential but does not explicitly integrate interval-based rebalancing targets as priors \\
+\midrule
+\multicolumn{4}{l}{\textbf{C. RL Algorithmic Foundations for Discrete Decision-Making}} \\
+\midrule
+\textcite{sutton1998reinforcement} & Foundational reinforcement learning framework and value/policy learning principles & Theoretical RL framework (MDP, value functions, policy iteration) & Provides general foundations but no domain-specific guidance for hierarchical rebalancing execution \\
+\textcite{mnih2015human} & Deep value-based learning from high-dimensional state signals & Deep Q-Network (DQN) & Known overestimation bias and instability under stochastic transitions \\
+\textcite{van2016deep} & Reduce value overestimation in value-based RL & Double DQN (decoupled selection/evaluation) & Algorithmic stability improved, but integration with hierarchical planning remains open \\
+\textcite{wang2016dueling} & Improve value estimation when actions have similar effects & Dueling network architecture & Architectural gain does not itself solve planning--execution coordination \\
+\textcite{schulman2017proximal} & Stable large-scale policy updates in RL & PPO (policy-gradient) & Strong for continuous/high-dimensional control; less naturally aligned with simple binary trigger actions \\
+\midrule
+\multicolumn{4}{l}{\textbf{D. User Incentive Mechanisms and Hybrid Rebalancing}} \\
+\midrule
+\textcite{cheng2021} & Incentive bidding in free-floating bike sharing & Bidding incentive mechanism (BIM) & Budget-efficient but high interaction complexity and potential strategic behavior \\
+\textcite{li2021static} & Joint optimization of incentives and static rebalancing & Optimization-based incentive allocation under constraints & Mostly interval/static setting; limited event-triggered execution guidance \\
+\textcite{neijmeijer2020} & Real-world effectiveness of simple incentive offers & Living-lab posted-price experiment & Effective and practical, but still needs state-aware selective triggering to avoid budget waste \\
+\textcite{duan2019} & Destination incentives for spatial demand steering & Destination-oriented incentive design & Demonstrates directional effectiveness, but not a full real-time decision policy linked to rebalancing goals \\
+\textcite{wang2021two} & Two-stage incentives for pick-up and drop-off control & Two-stage mechanism design & Adds flexibility but increases operational and parameter complexity \\
+\textcite{emami2024integrated} & Integrated operator/user hybrid rebalancing & Joint operational and incentive framework & Better integration, yet still lacks a lightweight binary trip-level execution refiner tied to interval-based targets \\
+\bottomrule
+\end{tabularx}
+\normalsize
+\end{table}
+
+The synthesis above directly informs the design choices in Chapter 3 and Chapter 4. The identified temporal-latency problem motivates an explicit execution-mismatch formulation and event-driven decision hierarchy, while the limitations of end-to-end control motivate a refinement-layer design that uses interval-based rebalancing outputs as priors. Likewise, the literature on posted-price and hybrid incentives supports the adoption of a binary, state-dependent triggering mechanism with transparent operational logic, which is then translated into the state, action, and reward design presented in the methodological chapters.
