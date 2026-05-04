@@ -1,7 +1,5 @@
 \chapter{Methodology}
 \label{chapter:methodology-overview}
-\label{chapter:environment-data}
-\label{chapter:refinement-framework}
 
 This chapter presents the methodological framework of the thesis. Building on the problem definition in Chapter~\ref{chapter:objectives-problem}, it describes the event-driven simulation environment, the way relocation guidance from the upstream OR model enters the execution layer, and the formulation of the trip-level refinement problem for reinforcement-learning-based evaluation. The emphasis is on the operational logic of the framework rather than on the internal formulation of the upstream rebalancing model.
 
@@ -143,22 +141,22 @@ The base and offer utilities are written as
 V_i^{(\textit{base})}
 =\;&
 \frac{1}{2}\beta_{ES}
-\beta_{walk}\,walk_i^{base}
-\beta_{unlock}\cdot 1
-\beta_{ride}\,c_i^{base}
-\beta_{batt}\,r_i^{base}
++\beta_{walk}\,walk_i^{base}
++\beta_{unlock}\cdot 1
++\beta_{ride}\,c_i^{base}
++\beta_{batt}\,r_i^{base}
 \\
 &+
 \beta_{type}\,\text{type}_{25,i}
-\beta_{prev}\,\text{prev\_use}_i
-\beta_{bike}\,\text{bike}_i
-\beta_{inc}\,\text{income\_low}_i
++\beta_{prev}\,\text{prev\_use}_i
++\beta_{bike}\,\text{bike}_i
++\beta_{inc}\,\text{income\_low}_i
 \\
 &+
 \beta_{alone}\,\text{living\_alone}_i
-\beta_{shared}\,\text{living\_shared}_i
-\eta_{att}\,\text{attitude}_i
-\eta_{range}\,\text{range\_anxiety}_i,
++\beta_{shared}\,\text{living\_shared}_i
++\eta_{att}\,\text{attitude}_i
++\eta_{range}\,\text{range\_anxiety}_i,
 \end{aligned}
 \end{equation}
 \begin{equation}
@@ -166,22 +164,22 @@ V_i^{(\textit{base})}
 V_i^{(\textit{offer})}
 =\;&
 \frac{1}{2}\beta_{ES}
-\beta_{walk}\,walk_i^{offer}
-\beta_{unlock}\cdot 1
-\beta_{ride}\,c_i^{offer}
-\beta_{batt}\,r_i^{offer}
++\beta_{walk}\,walk_i^{offer}
++\beta_{unlock}\cdot 1
++\beta_{ride}\,c_i^{offer}
++\beta_{batt}\,r_i^{offer}
 \\
 &+
 \beta_{type}\,\text{type}_{25,i}
-\beta_{prev}\,\text{prev\_use}_i
-\beta_{bike}\,\text{bike}_i
-\beta_{inc}\,\text{income\_low}_i
++\beta_{prev}\,\text{prev\_use}_i
++\beta_{bike}\,\text{bike}_i
++\beta_{inc}\,\text{income\_low}_i
 \\
 &+
 \beta_{alone}\,\text{living\_alone}_i
-\beta_{shared}\,\text{living\_shared}_i
-\eta_{att}\,\text{attitude}_i
-\eta_{range}\,\text{range\_anxiety}_i.
++\beta_{shared}\,\text{living\_shared}_i
++\eta_{att}\,\text{attitude}_i
++\eta_{range}\,\text{range\_anxiety}_i.
 \end{aligned}
 \end{equation}
 The opt-out alternative is the reference utility:
@@ -342,6 +340,8 @@ The reward combines five components: a realized-loss term, an EDL-improvement te
     -
     \beta_r Rej_i.
 \end{equation}
+
+Here, \(L_i\) is the realized no-supply loss over the decision window from decision step \(i\) to the next decision step (or episode end), restricted to the three involved zones \(O_i\), \(D1_i\), and \(R_i\). \(\Delta EDL_i\) is the expected-demand-loss difference induced by the realized action outcome under the fixed OR guidance. \(Acc_i\in\{0,1\}\) indicates whether the relocation option is realized, \(Cost_i\) is realized incentive payout (counted only when relocation is realized), and \(Rej_i\in\{0,1\}\) indicates activated-but-not-accepted outcomes. The coefficients \(w_L,w_E,\beta_a,\beta_c,\beta_r\) control the relative contribution of these components.
 
 To stabilize training signals across episodes, the realized-loss and EDL-improvement components are normalized and clipped as
 \begin{equation}

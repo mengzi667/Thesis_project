@@ -14,7 +14,7 @@ from rl.trainer import AlwaysOfferPolicy, GreedyPolicy, NoOfferPolicy, run_episo
 
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Evaluate three policies: always_offer / no_offer / checkpoint")
+    p = argparse.ArgumentParser(description="Evaluate policies for Scenario 1")
     p.add_argument("--checkpoint", type=str, default="results/rl_scenario1/checkpoints/ddqn_final.pt")
     p.add_argument("--episodes", type=int, default=None)
     p.add_argument("--output-dir", type=str, default=None)
@@ -25,6 +25,13 @@ def parse_args() -> argparse.Namespace:
         type=str,
         default="main_comparable",
         choices=["main_comparable", "diagnostic_stress", "final_retrained_stress"],
+    )
+    p.add_argument(
+        "--policy-mode",
+        type=str,
+        default="three",
+        choices=["three", "checkpoint_only"],
+        help="three=always_offer+no_offer+checkpoint; checkpoint_only=run checkpoint policy only",
     )
     p.add_argument("--w-l", type=float, default=None)
     p.add_argument("--w-e", type=float, default=None)
@@ -126,6 +133,32 @@ def _to_prefixed_metrics(prefix: str, result) -> dict:
     }
 
 
+def _to_ckpt_metrics(result) -> dict:
+    return {
+        "total_requests": result.total_requests,
+        "served_trips": result.served_trips,
+        "unserved_no_supply": result.unserved_no_supply,
+        "total_no_supply": result.unserved_no_supply,
+        "service_rate": result.service_rate,
+        "relocation_offers": result.relocation_offers,
+        "relocation_accepted": result.relocation_accepted,
+        "transitions": result.transitions,
+        "mean_reward": result.mean_reward,
+        "mean_reward_realized_term": result.mean_reward_realized_term,
+        "sum_reward_realized_term": result.sum_reward_realized_term,
+        "mean_reward_edl_term": result.mean_reward_edl_term,
+        "sum_reward_edl_term": result.sum_reward_edl_term,
+        "mean_reward_accept_term": result.mean_reward_accept_term,
+        "sum_reward_accept_term": result.sum_reward_accept_term,
+        "mean_realized_loss": result.mean_realized_loss,
+        "sum_realized_loss": result.sum_realized_loss,
+        "window_od123_loss": result.sum_realized_loss,
+        "mean_delta_edl": result.mean_delta_edl,
+        "sum_delta_edl": result.sum_delta_edl,
+        "generated_trips": result.total_requests,
+    }
+
+
 def _summary_mean(df: pd.DataFrame, col: str) -> float:
     return float(df[col].mean()) if len(df) else 0.0
 
@@ -172,83 +205,129 @@ def main() -> None:
     rows = []
     trip_rows: list[dict] = []
     seeds = cfg.eval_seeds()
-    pbar = tqdm(seeds, total=cfg.eval_episodes, desc="RL eval (3 policies)", unit="ep")
+    pbar_desc = "RL eval (3 policies)" if args.policy_mode == "three" else "RL eval (checkpoint only)"
+    pbar = tqdm(seeds, total=cfg.eval_episodes, desc=pbar_desc, unit="ep")
     for ep_idx, seed in enumerate(pbar, start=1):
-        r_ao, t_ao = run_episode(seed=seed, cfg=cfg, policy=ao_policy)
-        r_no, t_no = run_episode(seed=seed, cfg=cfg, policy=no_policy)
-        r_ck, t_ck = run_episode(seed=seed, cfg=cfg, policy=ckpt_policy)
+        if args.policy_mode == "three":
+            r_ao, t_ao = run_episode(seed=seed, cfg=cfg, policy=ao_policy)
+            r_no, t_no = run_episode(seed=seed, cfg=cfg, policy=no_policy)
+            r_ck, t_ck = run_episode(seed=seed, cfg=cfg, policy=ckpt_policy)
 
-        if t_ao.trip_rows:
-            for r in t_ao.trip_rows:
-                rr = dict(r)
-                rr["episode"] = ep_idx
-                rr["seed"] = seed
-                rr["policy"] = "always_offer"
-                trip_rows.append(rr)
-        if t_no.trip_rows:
-            for r in t_no.trip_rows:
-                rr = dict(r)
-                rr["episode"] = ep_idx
-                rr["seed"] = seed
-                rr["policy"] = "no_offer"
-                trip_rows.append(rr)
-        if t_ck.trip_rows:
-            for r in t_ck.trip_rows:
-                rr = dict(r)
-                rr["episode"] = ep_idx
-                rr["seed"] = seed
-                rr["policy"] = "checkpoint"
-                trip_rows.append(rr)
+            if t_ao.trip_rows:
+                for r in t_ao.trip_rows:
+                    rr = dict(r)
+                    rr["episode"] = ep_idx
+                    rr["seed"] = seed
+                    rr["policy"] = "always_offer"
+                    trip_rows.append(rr)
+            if t_no.trip_rows:
+                for r in t_no.trip_rows:
+                    rr = dict(r)
+                    rr["episode"] = ep_idx
+                    rr["seed"] = seed
+                    rr["policy"] = "no_offer"
+                    trip_rows.append(rr)
+            if t_ck.trip_rows:
+                for r in t_ck.trip_rows:
+                    rr = dict(r)
+                    rr["episode"] = ep_idx
+                    rr["seed"] = seed
+                    rr["policy"] = "checkpoint"
+                    trip_rows.append(rr)
 
-        row = {"episode": ep_idx, "seed": seed}
-        row.update(_to_prefixed_metrics("ao", r_ao))
-        row.update(_to_prefixed_metrics("no", r_no))
-        row.update(_to_prefixed_metrics("ckpt", r_ck))
-        rows.append(row)
+            row = {"episode": ep_idx, "seed": seed}
+            row.update(_to_prefixed_metrics("ao", r_ao))
+            row.update(_to_prefixed_metrics("no", r_no))
+            row.update(_to_prefixed_metrics("ckpt", r_ck))
+            rows.append(row)
 
-        pbar.set_postfix(
-            {
-                "ao_sr": f"{r_ao.service_rate:.3f}",
-                "no_sr": f"{r_no.service_rate:.3f}",
-                "ck_sr": f"{r_ck.service_rate:.3f}",
-                "ao_off": int(r_ao.relocation_offers),
-                "no_off": int(r_no.relocation_offers),
-                "ck_off": int(r_ck.relocation_offers),
-            }
-        )
+            pbar.set_postfix(
+                {
+                    "ao_sr": f"{r_ao.service_rate:.3f}",
+                    "no_sr": f"{r_no.service_rate:.3f}",
+                    "ck_sr": f"{r_ck.service_rate:.3f}",
+                    "ao_off": int(r_ao.relocation_offers),
+                    "no_off": int(r_no.relocation_offers),
+                    "ck_off": int(r_ck.relocation_offers),
+                }
+            )
+        else:
+            r_ck, t_ck = run_episode(seed=seed, cfg=cfg, policy=ckpt_policy)
+            if t_ck.trip_rows:
+                for r in t_ck.trip_rows:
+                    rr = dict(r)
+                    rr["episode"] = ep_idx
+                    rr["seed"] = seed
+                    rr["policy"] = "checkpoint"
+                    trip_rows.append(rr)
+
+            row = {"episode": ep_idx, "seed": seed}
+            row.update(_to_ckpt_metrics(r_ck))
+            rows.append(row)
+            pbar.set_postfix(
+                {
+                    "ck_sr": f"{r_ck.service_rate:.3f}",
+                    "ck_off": int(r_ck.relocation_offers),
+                    "ck_acc": int(r_ck.relocation_accepted),
+                }
+            )
         if ep_idx >= cfg.eval_episodes:
             break
 
     df = pd.DataFrame(rows)
     (out / "metrics").mkdir(parents=True, exist_ok=True)
-    df.to_csv(out / "metrics" / "eval_three_policies.csv", index=False)
-    # Compatibility alias for existing tooling expecting old filename.
-    df.to_csv(out / "metrics" / "eval_or_vs_rl.csv", index=False)
+    if args.policy_mode == "three":
+        df.to_csv(out / "metrics" / "eval_three_policies.csv", index=False)
+        # Compatibility alias for existing tooling expecting old filename.
+        df.to_csv(out / "metrics" / "eval_or_vs_rl.csv", index=False)
+        summary = {"episodes": int(len(df)), "strategy_set": "always_offer|no_offer|checkpoint"}
 
-    summary = {"episodes": int(len(df)), "strategy_set": "always_offer|no_offer|checkpoint"}
-
-    for prefix in ("ao", "no", "ckpt"):
-        summary[f"{prefix}_mean_service_rate"] = _summary_mean(df, f"{prefix}_service_rate")
-        summary[f"{prefix}_sum_no_supply"] = _summary_sum(df, f"{prefix}_unserved_no_supply")
-        summary[f"{prefix}_total_no_supply"] = summary[f"{prefix}_sum_no_supply"]
-        summary[f"{prefix}_mean_transitions"] = _summary_mean(df, f"{prefix}_transitions")
-        summary[f"{prefix}_mean_offers"] = _summary_mean(df, f"{prefix}_relocation_offers")
-        summary[f"{prefix}_mean_reward"] = _summary_mean(df, f"{prefix}_mean_reward")
-        summary[f"{prefix}_mean_reward_realized_term"] = _summary_mean(df, f"{prefix}_mean_reward_realized_term")
-        summary[f"{prefix}_sum_reward_realized_term"] = _summary_sum(df, f"{prefix}_sum_reward_realized_term")
-        summary[f"{prefix}_mean_reward_edl_term"] = _summary_mean(df, f"{prefix}_mean_reward_edl_term")
-        summary[f"{prefix}_sum_reward_edl_term"] = _summary_sum(df, f"{prefix}_sum_reward_edl_term")
-        summary[f"{prefix}_mean_reward_accept_term"] = _summary_mean(df, f"{prefix}_mean_reward_accept_term")
-        summary[f"{prefix}_sum_reward_accept_term"] = _summary_sum(df, f"{prefix}_sum_reward_accept_term")
-        summary[f"{prefix}_mean_realized_loss"] = _summary_mean(df, f"{prefix}_mean_realized_loss")
-        summary[f"{prefix}_sum_realized_loss"] = _summary_sum(df, f"{prefix}_sum_realized_loss")
-        summary[f"{prefix}_window_od123_loss"] = summary[f"{prefix}_sum_realized_loss"]
-        summary[f"{prefix}_mean_delta_edl"] = _summary_mean(df, f"{prefix}_mean_delta_edl")
-        summary[f"{prefix}_sum_delta_edl"] = _summary_sum(df, f"{prefix}_sum_delta_edl")
-        tc_m, tc_v, tc_f = _fano_like(df, f"{prefix}_generated_trips")
-        summary[f"{prefix}_trip_count_mean"] = tc_m
-        summary[f"{prefix}_trip_count_var"] = tc_v
-        summary[f"{prefix}_fano_like"] = tc_f
+        for prefix in ("ao", "no", "ckpt"):
+            summary[f"{prefix}_mean_service_rate"] = _summary_mean(df, f"{prefix}_service_rate")
+            summary[f"{prefix}_sum_no_supply"] = _summary_sum(df, f"{prefix}_unserved_no_supply")
+            summary[f"{prefix}_total_no_supply"] = summary[f"{prefix}_sum_no_supply"]
+            summary[f"{prefix}_mean_transitions"] = _summary_mean(df, f"{prefix}_transitions")
+            summary[f"{prefix}_mean_offers"] = _summary_mean(df, f"{prefix}_relocation_offers")
+            summary[f"{prefix}_mean_reward"] = _summary_mean(df, f"{prefix}_mean_reward")
+            summary[f"{prefix}_mean_reward_realized_term"] = _summary_mean(df, f"{prefix}_mean_reward_realized_term")
+            summary[f"{prefix}_sum_reward_realized_term"] = _summary_sum(df, f"{prefix}_sum_reward_realized_term")
+            summary[f"{prefix}_mean_reward_edl_term"] = _summary_mean(df, f"{prefix}_mean_reward_edl_term")
+            summary[f"{prefix}_sum_reward_edl_term"] = _summary_sum(df, f"{prefix}_sum_reward_edl_term")
+            summary[f"{prefix}_mean_reward_accept_term"] = _summary_mean(df, f"{prefix}_mean_reward_accept_term")
+            summary[f"{prefix}_sum_reward_accept_term"] = _summary_sum(df, f"{prefix}_sum_reward_accept_term")
+            summary[f"{prefix}_mean_realized_loss"] = _summary_mean(df, f"{prefix}_mean_realized_loss")
+            summary[f"{prefix}_sum_realized_loss"] = _summary_sum(df, f"{prefix}_sum_realized_loss")
+            summary[f"{prefix}_window_od123_loss"] = summary[f"{prefix}_sum_realized_loss"]
+            summary[f"{prefix}_mean_delta_edl"] = _summary_mean(df, f"{prefix}_mean_delta_edl")
+            summary[f"{prefix}_sum_delta_edl"] = _summary_sum(df, f"{prefix}_sum_delta_edl")
+            tc_m, tc_v, tc_f = _fano_like(df, f"{prefix}_generated_trips")
+            summary[f"{prefix}_trip_count_mean"] = tc_m
+            summary[f"{prefix}_trip_count_var"] = tc_v
+            summary[f"{prefix}_fano_like"] = tc_f
+    else:
+        df.to_csv(out / "metrics" / "eval_checkpoint_only.csv", index=False)
+        summary = {"episodes": int(len(df)), "strategy_set": "checkpoint_only"}
+        summary["ckpt_mean_service_rate"] = _summary_mean(df, "service_rate")
+        summary["ckpt_sum_no_supply"] = _summary_sum(df, "unserved_no_supply")
+        summary["ckpt_total_no_supply"] = summary["ckpt_sum_no_supply"]
+        summary["ckpt_mean_transitions"] = _summary_mean(df, "transitions")
+        summary["ckpt_mean_offers"] = _summary_mean(df, "relocation_offers")
+        summary["ckpt_mean_reward"] = _summary_mean(df, "mean_reward")
+        summary["ckpt_mean_reward_realized_term"] = _summary_mean(df, "mean_reward_realized_term")
+        summary["ckpt_sum_reward_realized_term"] = _summary_sum(df, "sum_reward_realized_term")
+        summary["ckpt_mean_reward_edl_term"] = _summary_mean(df, "mean_reward_edl_term")
+        summary["ckpt_sum_reward_edl_term"] = _summary_sum(df, "sum_reward_edl_term")
+        summary["ckpt_mean_reward_accept_term"] = _summary_mean(df, "mean_reward_accept_term")
+        summary["ckpt_sum_reward_accept_term"] = _summary_sum(df, "sum_reward_accept_term")
+        summary["ckpt_mean_realized_loss"] = _summary_mean(df, "mean_realized_loss")
+        summary["ckpt_sum_realized_loss"] = _summary_sum(df, "sum_realized_loss")
+        summary["ckpt_window_od123_loss"] = summary["ckpt_sum_realized_loss"]
+        summary["ckpt_mean_delta_edl"] = _summary_mean(df, "mean_delta_edl")
+        summary["ckpt_sum_delta_edl"] = _summary_sum(df, "sum_delta_edl")
+        tc_m, tc_v, tc_f = _fano_like(df, "generated_trips")
+        summary["ckpt_trip_count_mean"] = tc_m
+        summary["ckpt_trip_count_var"] = tc_v
+        summary["ckpt_fano_like"] = tc_f
 
     summary.update(
         {

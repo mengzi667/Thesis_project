@@ -58,11 +58,9 @@ $groups = @(
   @{ id="g8"; betaA="0.40"; betaC="0.12"; betaR="0.005"; wL="0.3"; wE="0.7" }
 )
 
-# Profile scale settings
+# Main-only profile setting (checkpoint sensitivity in main profile)
 $profiles = @(
-  @{ name="main";   global="1.5"; windowScale="4.0"; odScale="8.0"; seed="41000" },
-  @{ name="sparse"; global="1.0"; windowScale="2.0"; odScale="5.0"; seed="42000" },
-  @{ name="dense";  global="1.8"; windowScale="5.0"; odScale="10.0"; seed="43000" }
+  @{ name="main"; global="1.5"; windowScale="4.0"; odScale="8.0"; seed="41000" }
 )
 
 foreach ($g in $groups) {
@@ -86,6 +84,7 @@ foreach ($g in $groups) {
     Write-Host ("  [EVAL] {0} -> {1}" -f $p.name, $evalOut)
     & $PythonExe -m rl.evaluate `
       @commonEvalBase `
+      --policy-mode checkpoint_only `
       --checkpoint $ckpt `
       --output-dir $evalOut `
       --seed-start $p.seed `
