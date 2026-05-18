@@ -22,6 +22,7 @@ from rl.trainer import (
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Train DDQN for Scenario 1")
+    p.add_argument("--scenario", type=str, choices=["scenario1", "scenario2"], default=None)
     p.add_argument("--episodes", type=int, default=None)
     p.add_argument("--output-dir", type=str, default=None)
     p.add_argument("--device", type=str, default="cpu")
@@ -70,6 +71,8 @@ def main() -> None:
 
     if args.episodes is not None:
         cfg.train_episodes = int(args.episodes)
+    if args.scenario is not None:
+        cfg.scenario = str(args.scenario).strip().lower()
     if args.output_dir is not None:
         cfg.output_dir = str(args.output_dir)
     if args.w_l is not None:
@@ -135,14 +138,15 @@ def main() -> None:
     out = cfg.ensure_output_dirs()
     rng = np.random.default_rng(12345)
 
-    # State dim from Scenario1FeatureBuilder spec
-    state_dim = 22
+    state_dim = int(cfg.state_dim())
+    action_dim = int(cfg.action_dim())
     agent = DDQNAgent(
         state_dim=state_dim,
         hidden_dim=cfg.hidden_dim,
         lr=cfg.lr,
         gamma_rl=cfg.gamma_rl,
         grad_clip=cfg.grad_clip,
+        action_dim=action_dim,
         device=args.device,
     )
 
@@ -244,6 +248,12 @@ def main() -> None:
                 "sum_realized_loss": ep_result.sum_realized_loss,
                 "mean_delta_edl": ep_result.mean_delta_edl,
                 "sum_delta_edl": ep_result.sum_delta_edl,
+                "option_offer_low_count": ep_result.option_offer_low_count,
+                "option_offer_high_count": ep_result.option_offer_high_count,
+                "option_offer_flex_count": ep_result.option_offer_flex_count,
+                "option_offer_low_rate": ep_result.option_offer_low_rate,
+                "option_offer_high_rate": ep_result.option_offer_high_rate,
+                "option_offer_flex_rate": ep_result.option_offer_flex_rate,
                 "mean_realized_norm": mean_realized_norm,
                 "mean_delta_edl_norm": mean_delta_norm,
                 "realized_clip_hit_rate": realized_clip_hit_rate,
@@ -311,6 +321,8 @@ def main() -> None:
         {
             "episodes": cfg.train_episodes,
             "state_dim": state_dim,
+            "action_dim": action_dim,
+            "scenario": cfg.scenario,
             "batch_size": cfg.batch_size,
             "replay_capacity": cfg.replay_capacity,
             "warmup_steps": cfg.warmup_steps,

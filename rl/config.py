@@ -21,6 +21,12 @@ from config import (
 
 @dataclass
 class RLConfig:
+    # Scenario mode:
+    #   scenario1 -> binary action {no_offer, offer}
+    #   scenario2 -> battery-option action
+    #                {no_offer, offer_low, offer_high, offer_flex}
+    scenario: str = "scenario1"
+
     # Training horizon
     episode_minutes: float = 120.0
     planning_period: float = 15.0
@@ -88,6 +94,16 @@ class RLConfig:
     transition_dump_every: int = 20
     early_stop_episode: int | None = None
     early_stop_min_offers: float | None = None
+
+    # Scenario 2 defaults
+    scenario2_default_offer_action: int = 2  # offer_high
+
+    def action_dim(self) -> int:
+        return 4 if str(self.scenario).strip().lower() == "scenario2" else 2
+
+    def state_dim(self) -> int:
+        # scenario1 base=22; scenario2 appends 5 feasibility features
+        return 27 if str(self.scenario).strip().lower() == "scenario2" else 22
 
     def train_seeds(self) -> List[int]:
         return [self.seed_start_train + i for i in range(self.train_episodes)]

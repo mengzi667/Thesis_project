@@ -14,6 +14,7 @@ from rl.trainer import AlwaysOfferPolicy, EpsilonPolicy, NoOfferPolicy, run_epis
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Calibrate L_ref / E_ref from transition samples (P95).")
+    p.add_argument("--scenario", type=str, choices=["scenario1", "scenario2"], default="scenario2")
     p.add_argument("--episodes", type=int, default=150)
     p.add_argument("--seed-start", type=int, default=31000)
     p.add_argument("--quantile", type=float, default=0.95)
@@ -44,6 +45,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def _apply_cfg_overrides(cfg: RLConfig, args: argparse.Namespace) -> None:
+    cfg.scenario = str(args.scenario).strip().lower()
     if args.or_input_path is not None:
         cfg.or_input_path = str(args.or_input_path)
     if args.omega_global_scale is not None:
@@ -94,11 +96,12 @@ def main() -> None:
             raise FileNotFoundError(f"checkpoint not found: {ckpt_path}")
         rng = np.random.default_rng(20260429)
         agent = DDQNAgent(
-            state_dim=22,
+            state_dim=int(cfg.state_dim()),
             hidden_dim=cfg.hidden_dim,
             lr=cfg.lr,
             gamma_rl=cfg.gamma_rl,
             grad_clip=cfg.grad_clip,
+            action_dim=int(cfg.action_dim()),
             device=args.device,
         )
         agent.load(str(ckpt_path))
@@ -134,6 +137,7 @@ def main() -> None:
         "l_ref": float(l_ref),
         "e_ref": float(e_ref),
         "policy": str(args.policy),
+        "scenario": str(cfg.scenario),
         "epsilon": float(args.epsilon),
         "checkpoint": str(args.checkpoint) if args.checkpoint else None,
         "omega_profile": {

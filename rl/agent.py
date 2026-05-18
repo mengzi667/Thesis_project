@@ -37,14 +37,16 @@ class DDQNAgent:
         lr: float,
         gamma_rl: float,
         grad_clip: float,
+        action_dim: int = 2,
         device: str = "gpu",
     ) -> None:
         self.device = torch.device(device)
         self.gamma_rl = float(gamma_rl)
         self.grad_clip = float(grad_clip)
+        self.action_dim = int(action_dim)
 
-        self.q_online = QNetwork(state_dim, hidden_dim).to(self.device)
-        self.q_target = QNetwork(state_dim, hidden_dim).to(self.device)
+        self.q_online = QNetwork(state_dim, hidden_dim, action_dim=self.action_dim).to(self.device)
+        self.q_target = QNetwork(state_dim, hidden_dim, action_dim=self.action_dim).to(self.device)
         self.q_target.load_state_dict(self.q_online.state_dict())
         self.q_target.eval()
 
@@ -52,13 +54,30 @@ class DDQNAgent:
         self.loss_fn = nn.SmoothL1Loss()
         self.stats = DDQNStats()
 
-    def act(self, state: np.ndarray, epsilon: float, rng: np.random.Generator) -> int:
+    def act(
+        self,
+        state: np.ndarray,
+        epsilon: float,
+        rng: np.random.Generator,
+        valid_actions: list[int] | None = None,
+    ) -> int:
+        if valid_actions:
+            allowed = sorted({int(a) for a in valid_actions if 0 <= int(a) < self.action_dim})
+        else:
+            allowed = list(range(self.action_dim))
+        if not allowed:
+            allowed = [0]
+
         if rng.random() < epsilon:
-            return int(rng.integers(0, 2))
+            return int(rng.choice(np.asarray(allowed, dtype=np.int64)))
         s = torch.from_numpy(state.astype(np.float32)).unsqueeze(0).to(self.device)
         with torch.no_grad():
             q = self.q_online(s)
-            return int(torch.argmax(q, dim=1).item())
+            q_np = q.squeeze(0).detach().cpu().numpy()
+            masked = np.full_like(q_np, fill_value=-np.inf, dtype=np.float32)
+            for a in allowed:
+                masked[int(a)] = float(q_np[int(a)])
+            return int(np.argmax(masked))
 
     def train_step(self, batch) -> float:
         states, actions, rewards, next_states, dones = batch

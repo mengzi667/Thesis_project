@@ -94,6 +94,7 @@ class SimulationEngine:
         self.snapshot_interval = snapshot_interval
         self.verbose = verbose
         self.print_snapshots = bool(print_snapshots)
+        self.rl_scenario = "scenario1"
         self._current_time: float = 0.0
         # Delayed reward bookkeeping (Rina-style):
         # realized loss is finalized between two RL decision points.
@@ -175,6 +176,10 @@ class SimulationEngine:
         rt_base_min = 0.0
         rt_offer_min = 0.0
         walk_offer_min = 0.0
+        offer_option_mode = "none"
+        mask_block_reason = "none"
+        fallback_stage = "none"
+        valid_actions: List[int] = []
 
         if reloc_opp is not None:
             extra_walk = self.spatial.distance_between(
@@ -214,6 +219,15 @@ class SimulationEngine:
                 )
             return
 
+        # Pre-compute base / option candidates for Scenario 2 action masking.
+        base_candidate: Optional[Scooter] = available[0] if available else None
+        high_candidates: List[Scooter] = [
+            s for s in available if str(s.battery_category) == "high"
+        ]
+        low_candidates: List[Scooter] = [
+            s for s in available if str(s.battery_category) == "low"
+        ]
+
         # ── Step 4 (cont.): compute trip/offer attributes ────────────────────
         if reloc_opp is not None:
             walk_offer_min = self._meters_to_minutes(extra_walk, SARA_WALK_SPEED_KMH)
@@ -240,6 +254,14 @@ class SimulationEngine:
                         zone_ids=self.zone_ids,
                         edl_model=self.edl_model,
                     )
+                scenario = str(self.rl_scenario).strip().lower()
+                s2_mask = self._scenario2_action_mask(
+                    reloc_opp=reloc_opp,
+                    high_candidates=high_candidates,
+                    low_candidates=low_candidates,
+                )
+                valid_actions = list(s2_mask["valid_actions"]) if scenario == "scenario2" else [0, 1]
+
                 ctx = DecisionContext(
                     request_time=trip.request_time,
                     planning_period=self.snapshot_interval,
@@ -258,20 +280,53 @@ class SimulationEngine:
                     budget_remaining=float(self.budget_remaining),
                     zone_state_before=zone_state_before,
                     zone_state_after=zone_state_before,
+                    offer_option_mode="none",
+                    offer_low_feasible=bool(s2_mask["offer_low_feasible"]),
+                    offer_high_feasible=bool(s2_mask["offer_high_feasible"]),
+                    offer_flex_feasible=bool(s2_mask["offer_flex_feasible"]),
+                    budget_feasible=bool(s2_mask["budget_feasible"]),
+                    quota_feasible=bool(s2_mask["quota_feasible"]),
                 )
                 rl_state = self.rl_feature_builder.build(ctx, rl_edl_before)
                 # Delayed reward: finalize previous decision when new decision state arrives.
                 self._finalize_pending_transition(next_state=rl_state, done=0.0)
-                rl_action = int(self.rl_policy.act(rl_state))
-                if rl_action == 0:
-                    relocation_offered = False
+                rl_action = int(self.rl_policy.act(rl_state, valid_actions=valid_actions))
+
+                if scenario == "scenario2":
+                    if rl_action not in valid_actions:
+                        mask_block_reason = "hard"
+                        fallback_stage = "no_offer"
+                        rl_action = 0
+                    offer_option_mode = self._scenario2_action_to_mode(rl_action)
+                    relocation_offered = bool(rl_action != 0)
                 else:
-                    relocation_offered = True
+                    if rl_action == 0:
+                        relocation_offered = False
+                    else:
+                        relocation_offered = True
 
         # Single-layer user decision.
-        # In Scenario 1 the scooter assignment is deterministic (highest battery),
-        # so both offer/base branches observe the same origin scooter quality.
-        best_battery_pct = max(float(s.battery_level) for s in available) * 100.0
+        # Scenario 1: base/offer share highest-battery candidate.
+        # Scenario 2: offer battery follows chosen option; base remains highest-battery.
+        scenario = str(self.rl_scenario).strip().lower()
+        if base_candidate is None:
+            best_battery_pct = 0.0
+        else:
+            best_battery_pct = float(base_candidate.battery_level) * 100.0
+        offer_candidate = base_candidate
+        if scenario == "scenario2" and reloc_opp is not None and relocation_offered:
+            offer_candidate = self._scenario2_select_offer_candidate(
+                action=int(rl_action) if rl_action is not None else 0,
+                base_candidate=base_candidate,
+                high_candidates=high_candidates,
+                low_candidates=low_candidates,
+            )
+            if offer_candidate is None:
+                relocation_offered = False
+                offer_option_mode = "none"
+                fallback_stage = "no_offer"
+        offer_battery_pct = float(offer_candidate.battery_level) * 100.0 if offer_candidate is not None else best_battery_pct
+
         user_choice = self.user_model.decide_trip_action(
             has_offer=bool(relocation_offered),
             incentive_amount=float(reloc_opp.incentive_amount) if (reloc_opp and relocation_offered) else 0.0,
@@ -279,7 +334,7 @@ class SimulationEngine:
             walk_base_min=0.0,
             rt_offer_min=rt_offer_min,
             rt_base_min=rt_base_min,
-            battery_offer=best_battery_pct,
+            battery_offer=offer_battery_pct,
             battery_base=best_battery_pct,
             user_type=trip.user_type,
         )
@@ -302,6 +357,9 @@ class SimulationEngine:
                 scooter_id=None,
                 user_choice="opt_out",
                 unserved_reason=UNSERVED_OPT_OUT,
+                offer_option_mode=offer_option_mode,
+                mask_block_reason=mask_block_reason,
+                fallback_stage=fallback_stage,
             ))
             self._queue_pending_rl_transition(
                 trip=trip,
@@ -315,6 +373,9 @@ class SimulationEngine:
                 relocation_accepted=False,
                 chosen=None,
                 zone_state_after=self.spatial.get_state_snapshot(),
+                offer_option_mode=offer_option_mode,
+                mask_block_reason=mask_block_reason,
+                fallback_stage=fallback_stage,
             )
             if self.verbose:
                 self._print_trip_event(
@@ -333,8 +394,14 @@ class SimulationEngine:
         if reloc_opp is not None:
             self.or_interface.consume_after_decision(reloc_opp, accepted=relocation_accepted)
 
-        # ── Step 5 (cont.): Scooter assignment (Scenario 1 rule) ────────────
-        chosen: Optional[Scooter] = self._decide_scooter(available, trip)
+        # ── Step 5 (cont.): Scooter assignment ───────────────────────────────
+        if scenario == "scenario2":
+            if relocation_accepted:
+                chosen = offer_candidate
+            else:
+                chosen = base_candidate
+        else:
+            chosen = self._decide_scooter(available, trip)
 
         if chosen is None:
             # Defensive guard: should not happen if 'available' is non-empty.
@@ -352,6 +419,9 @@ class SimulationEngine:
                 scooter_id=None,
                 user_choice=user_choice,
                 unserved_reason=UNSERVED_NO_SUPPLY,
+                offer_option_mode=offer_option_mode,
+                mask_block_reason=mask_block_reason,
+                fallback_stage=fallback_stage,
             ))
             if self.verbose:
                 self._print_trip_event(
@@ -387,6 +457,9 @@ class SimulationEngine:
             scooter_id=chosen.scooter_id,
             user_choice=user_choice,
             unserved_reason=None,
+            offer_option_mode=offer_option_mode,
+            mask_block_reason=mask_block_reason,
+            fallback_stage=fallback_stage,
         ))
 
         self._queue_pending_rl_transition(
@@ -401,6 +474,9 @@ class SimulationEngine:
             relocation_accepted=relocation_accepted,
             chosen=chosen,
             zone_state_after=self.spatial.get_state_snapshot(),
+            offer_option_mode=offer_option_mode,
+            mask_block_reason=mask_block_reason,
+            fallback_stage=fallback_stage,
         )
         if self.verbose:
             self._print_trip_event(
@@ -424,6 +500,9 @@ class SimulationEngine:
         relocation_accepted: bool,
         chosen: Optional[Scooter],
         zone_state_after: Dict[int, tuple],
+        offer_option_mode: str = "none",
+        mask_block_reason: str = "none",
+        fallback_stage: str = "none",
     ) -> None:
         if (
             self.rl_transition_logger is None
@@ -524,6 +603,9 @@ class SimulationEngine:
                 int(trip.destination_zone),
                 int(reloc_opp.recommended_dest),
             ),
+            "offer_option_mode": str(offer_option_mode),
+            "mask_block_reason": str(mask_block_reason),
+            "fallback_stage": str(fallback_stage),
         }
 
     def _finalize_pending_transition(self, next_state, done: float) -> None:
@@ -570,6 +652,9 @@ class SimulationEngine:
                 "offered": int(p["offered"]),
                 "accepted": int(p["accepted"]),
                 "reject_flag": int(p["reject_flag"]),
+                "offer_option_mode": str(p.get("offer_option_mode", "none")),
+                "mask_block_reason": str(p.get("mask_block_reason", "none")),
+                "fallback_stage": str(p.get("fallback_stage", "none")),
                 "delta_edl": float(delta_edl),
                 "base_cum_edl": float(p.get("base_cum_edl", 0.0)),
                 "actual_cum_edl": float(p.get("actual_cum_edl", 0.0)),
@@ -707,6 +792,69 @@ class SimulationEngine:
         if not available:
             return None
         return available[0]   # highest-battery scooter, strict priority (PRD §14)
+
+    # ── Scenario 2 helpers ───────────────────────────────────────────────────
+
+    def _scenario2_action_to_mode(self, action: int) -> str:
+        mapping = {
+            0: "none",
+            1: "offer_low",
+            2: "offer_high",
+            3: "offer_flex",
+        }
+        return mapping.get(int(action), "none")
+
+    def _scenario2_action_mask(
+        self,
+        reloc_opp: RelocationOpportunity,
+        high_candidates: List[Scooter],
+        low_candidates: List[Scooter],
+    ) -> Dict[str, object]:
+        offer_low_feasible = len(low_candidates) > 0
+        offer_high_feasible = len(high_candidates) > 0
+        offer_flex_feasible = offer_low_feasible or offer_high_feasible
+        quota_feasible = float(reloc_opp.quota_remaining) > 0.0
+        budget_feasible = (
+            float(self.budget_remaining) <= 0.0
+            or float(self.budget_remaining) >= float(reloc_opp.incentive_amount)
+        )
+
+        valid = [0]
+        if quota_feasible and budget_feasible:
+            if offer_low_feasible:
+                valid.append(1)
+            if offer_high_feasible:
+                valid.append(2)
+            if offer_flex_feasible:
+                valid.append(3)
+        return {
+            "valid_actions": sorted(set(valid)),
+            "offer_low_feasible": bool(offer_low_feasible),
+            "offer_high_feasible": bool(offer_high_feasible),
+            "offer_flex_feasible": bool(offer_flex_feasible),
+            "quota_feasible": bool(quota_feasible),
+            "budget_feasible": bool(budget_feasible),
+        }
+
+    def _scenario2_select_offer_candidate(
+        self,
+        action: int,
+        base_candidate: Optional[Scooter],
+        high_candidates: List[Scooter],
+        low_candidates: List[Scooter],
+    ) -> Optional[Scooter]:
+        a = int(action)
+        if a == 1:
+            return low_candidates[0] if low_candidates else None
+        if a == 2:
+            return high_candidates[0] if high_candidates else None
+        if a == 3:
+            if high_candidates:
+                return high_candidates[0]
+            if low_candidates:
+                return low_candidates[0]
+            return None
+        return base_candidate
 
     # ── Acceptance utility helpers ──────────────────────────────────────────
 

@@ -34,6 +34,9 @@ class TripRecord:
     scooter_id:          Optional[int]
     user_choice:         Optional[str] = None  # offer / base / opt_out
     unserved_reason:     Optional[str] = None  # None when served; see UNSERVED_* constants
+    offer_option_mode:   str = "none"          # scenario2: offer_low/high/flex/none
+    mask_block_reason:   str = "none"          # scenario2 diagnostics
+    fallback_stage:      str = "none"          # scenario2 diagnostics
 
 
 # ── MetricsLogger ─────────────────────────────────────────────────────────────
@@ -94,6 +97,10 @@ class MetricsLogger:
         choice_base = sum(1 for r in self.trip_records if r.user_choice == "base")
         choice_opt_out = sum(1 for r in self.trip_records if r.user_choice == "opt_out")
         choice_total = choice_offer + choice_base + choice_opt_out
+        option_offer_low = sum(1 for r in self.trip_records if r.offer_option_mode == "offer_low")
+        option_offer_high = sum(1 for r in self.trip_records if r.offer_option_mode == "offer_high")
+        option_offer_flex = sum(1 for r in self.trip_records if r.offer_option_mode == "offer_flex")
+        option_total = option_offer_low + option_offer_high + option_offer_flex
 
         # Fleet utilisation: fraction of trips where a scooter was actually assigned
         utilisation = served / total if total > 0 else 0.0
@@ -127,6 +134,18 @@ class MetricsLogger:
             ),
             "choice_opt_out_rate": (
                 choice_opt_out / choice_total if choice_total > 0 else 0.0
+            ),
+            "option_offer_low_count": option_offer_low,
+            "option_offer_high_count": option_offer_high,
+            "option_offer_flex_count": option_offer_flex,
+            "option_offer_low_rate": (
+                option_offer_low / option_total if option_total > 0 else 0.0
+            ),
+            "option_offer_high_rate": (
+                option_offer_high / option_total if option_total > 0 else 0.0
+            ),
+            "option_offer_flex_rate": (
+                option_offer_flex / option_total if option_total > 0 else 0.0
             ),
             # Operational metrics
             "fleet_utilisation":      utilisation,

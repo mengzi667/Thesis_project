@@ -9,7 +9,7 @@ import pandas as pd
 
 
 class RLPolicy(Protocol):
-    def act(self, state: np.ndarray) -> int: ...
+    def act(self, state: np.ndarray, valid_actions: Optional[List[int]] = None) -> int: ...
 
 
 @dataclass
@@ -32,6 +32,12 @@ class DecisionContext:
     # zone states at decision time
     zone_state_before: Dict[int, tuple]
     zone_state_after: Dict[int, tuple]
+    offer_option_mode: str = "none"
+    offer_low_feasible: bool = False
+    offer_high_feasible: bool = False
+    offer_flex_feasible: bool = False
+    budget_feasible: bool = False
+    quota_feasible: bool = False
 
 
 class TransitionLogger:
@@ -126,6 +132,31 @@ class Scenario1FeatureBuilder:
             dtype=np.float32,
         )
         return feat
+
+
+class Scenario2FeatureBuilder(Scenario1FeatureBuilder):
+    """
+    Scenario 2 feature builder (battery-option action space).
+    Extends Scenario 1 vector with option-level feasibility/context signals.
+    """
+
+    def build(
+        self,
+        ctx: DecisionContext,
+        edl_before: Dict[int, float],
+    ) -> np.ndarray:
+        base = super().build(ctx=ctx, edl_before=edl_before)
+        ext = np.asarray(
+            [
+                1.0 if ctx.offer_low_feasible else 0.0,
+                1.0 if ctx.offer_high_feasible else 0.0,
+                1.0 if ctx.offer_flex_feasible else 0.0,
+                1.0 if ctx.budget_feasible else 0.0,
+                1.0 if ctx.quota_feasible else 0.0,
+            ],
+            dtype=np.float32,
+        )
+        return np.concatenate([base, ext], axis=0)
 
 
 def estimate_zone_edl(

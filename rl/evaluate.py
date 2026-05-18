@@ -15,6 +15,7 @@ from rl.trainer import AlwaysOfferPolicy, GreedyPolicy, NoOfferPolicy, run_episo
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Evaluate policies for Scenario 1")
+    p.add_argument("--scenario", type=str, choices=["scenario1", "scenario2"], default=None)
     p.add_argument("--checkpoint", type=str, default="results/rl_scenario1/checkpoints/ddqn_final.pt")
     p.add_argument("--episodes", type=int, default=None)
     p.add_argument("--output-dir", type=str, default=None)
@@ -60,6 +61,8 @@ def parse_args() -> argparse.Namespace:
 
 
 def _apply_cfg_overrides(cfg: RLConfig, args: argparse.Namespace) -> None:
+    if args.scenario is not None:
+        cfg.scenario = str(args.scenario).strip().lower()
     if args.episodes is not None:
         cfg.eval_episodes = int(args.episodes)
     if args.output_dir is not None:
@@ -130,6 +133,12 @@ def _to_prefixed_metrics(prefix: str, result) -> dict:
         f"{prefix}_mean_delta_edl": result.mean_delta_edl,
         f"{prefix}_sum_delta_edl": result.sum_delta_edl,
         f"{prefix}_generated_trips": result.total_requests,
+        f"{prefix}_option_offer_low_count": result.option_offer_low_count,
+        f"{prefix}_option_offer_high_count": result.option_offer_high_count,
+        f"{prefix}_option_offer_flex_count": result.option_offer_flex_count,
+        f"{prefix}_option_offer_low_rate": result.option_offer_low_rate,
+        f"{prefix}_option_offer_high_rate": result.option_offer_high_rate,
+        f"{prefix}_option_offer_flex_rate": result.option_offer_flex_rate,
     }
 
 
@@ -156,6 +165,12 @@ def _to_ckpt_metrics(result) -> dict:
         "mean_delta_edl": result.mean_delta_edl,
         "sum_delta_edl": result.sum_delta_edl,
         "generated_trips": result.total_requests,
+        "option_offer_low_count": result.option_offer_low_count,
+        "option_offer_high_count": result.option_offer_high_count,
+        "option_offer_flex_count": result.option_offer_flex_count,
+        "option_offer_low_rate": result.option_offer_low_rate,
+        "option_offer_high_rate": result.option_offer_high_rate,
+        "option_offer_flex_rate": result.option_offer_flex_rate,
     }
 
 
@@ -186,19 +201,24 @@ def main() -> None:
     if not ckpt.exists():
         raise FileNotFoundError(f"checkpoint not found: {ckpt}")
 
-    state_dim = 22
+    state_dim = int(cfg.state_dim())
+    action_dim = int(cfg.action_dim())
     agent = DDQNAgent(
         state_dim=state_dim,
         hidden_dim=cfg.hidden_dim,
         lr=cfg.lr,
         gamma_rl=cfg.gamma_rl,
         grad_clip=cfg.grad_clip,
+        action_dim=action_dim,
         device=args.device,
     )
     agent.load(str(ckpt))
     rng = np.random.default_rng(54321)
 
-    ao_policy = AlwaysOfferPolicy()
+    ao_policy = AlwaysOfferPolicy(
+        scenario=cfg.scenario,
+        scenario2_offer_action=cfg.scenario2_default_offer_action,
+    )
     no_policy = NoOfferPolicy()
     ckpt_policy = GreedyPolicy(agent=agent, rng=rng)
 
@@ -300,6 +320,12 @@ def main() -> None:
             summary[f"{prefix}_window_od123_loss"] = summary[f"{prefix}_sum_realized_loss"]
             summary[f"{prefix}_mean_delta_edl"] = _summary_mean(df, f"{prefix}_mean_delta_edl")
             summary[f"{prefix}_sum_delta_edl"] = _summary_sum(df, f"{prefix}_sum_delta_edl")
+            summary[f"{prefix}_mean_option_offer_low_count"] = _summary_mean(df, f"{prefix}_option_offer_low_count")
+            summary[f"{prefix}_mean_option_offer_high_count"] = _summary_mean(df, f"{prefix}_option_offer_high_count")
+            summary[f"{prefix}_mean_option_offer_flex_count"] = _summary_mean(df, f"{prefix}_option_offer_flex_count")
+            summary[f"{prefix}_mean_option_offer_low_rate"] = _summary_mean(df, f"{prefix}_option_offer_low_rate")
+            summary[f"{prefix}_mean_option_offer_high_rate"] = _summary_mean(df, f"{prefix}_option_offer_high_rate")
+            summary[f"{prefix}_mean_option_offer_flex_rate"] = _summary_mean(df, f"{prefix}_option_offer_flex_rate")
             tc_m, tc_v, tc_f = _fano_like(df, f"{prefix}_generated_trips")
             summary[f"{prefix}_trip_count_mean"] = tc_m
             summary[f"{prefix}_trip_count_var"] = tc_v
@@ -324,6 +350,12 @@ def main() -> None:
         summary["ckpt_window_od123_loss"] = summary["ckpt_sum_realized_loss"]
         summary["ckpt_mean_delta_edl"] = _summary_mean(df, "mean_delta_edl")
         summary["ckpt_sum_delta_edl"] = _summary_sum(df, "sum_delta_edl")
+        summary["ckpt_mean_option_offer_low_count"] = _summary_mean(df, "option_offer_low_count")
+        summary["ckpt_mean_option_offer_high_count"] = _summary_mean(df, "option_offer_high_count")
+        summary["ckpt_mean_option_offer_flex_count"] = _summary_mean(df, "option_offer_flex_count")
+        summary["ckpt_mean_option_offer_low_rate"] = _summary_mean(df, "option_offer_low_rate")
+        summary["ckpt_mean_option_offer_high_rate"] = _summary_mean(df, "option_offer_high_rate")
+        summary["ckpt_mean_option_offer_flex_rate"] = _summary_mean(df, "option_offer_flex_rate")
         tc_m, tc_v, tc_f = _fano_like(df, "generated_trips")
         summary["ckpt_trip_count_mean"] = tc_m
         summary["ckpt_trip_count_var"] = tc_v
@@ -331,6 +363,9 @@ def main() -> None:
 
     summary.update(
         {
+            "scenario": cfg.scenario,
+            "state_dim": state_dim,
+            "action_dim": action_dim,
             "result_tag": str(args.result_tag),
             "checkpoint_path": str(ckpt),
             "or_input_path": cfg.or_input_path,

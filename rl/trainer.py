@@ -11,7 +11,7 @@ from main import build_simulation
 from rl.agent import DDQNAgent
 from rl.config import RLConfig
 from rl.replay_buffer import ReplayBuffer, Transition
-from rl.runtime import Scenario1FeatureBuilder, TransitionLogger
+from rl.runtime import Scenario1FeatureBuilder, Scenario2FeatureBuilder, TransitionLogger
 
 
 @dataclass
@@ -35,6 +35,12 @@ class EpisodeResult:
     sum_realized_loss: float
     mean_delta_edl: float
     sum_delta_edl: float
+    option_offer_low_count: int
+    option_offer_high_count: int
+    option_offer_flex_count: int
+    option_offer_low_rate: float
+    option_offer_high_rate: float
+    option_offer_flex_rate: float
 
 
 class EpsilonPolicy:
@@ -43,8 +49,8 @@ class EpsilonPolicy:
         self.epsilon = float(epsilon)
         self.rng = rng
 
-    def act(self, state: np.ndarray) -> int:
-        return self.agent.act(state, epsilon=self.epsilon, rng=self.rng)
+    def act(self, state: np.ndarray, valid_actions=None) -> int:
+        return self.agent.act(state, epsilon=self.epsilon, rng=self.rng, valid_actions=valid_actions)
 
 
 class GreedyPolicy:
@@ -52,22 +58,38 @@ class GreedyPolicy:
         self.agent = agent
         self.rng = rng
 
-    def act(self, state: np.ndarray) -> int:
-        return self.agent.act(state, epsilon=0.0, rng=self.rng)
+    def act(self, state: np.ndarray, valid_actions=None) -> int:
+        return self.agent.act(state, epsilon=0.0, rng=self.rng, valid_actions=valid_actions)
 
 
 class AlwaysOfferPolicy:
     """OR baseline policy: never suppress OR offers (action=1)."""
 
-    def act(self, state: np.ndarray) -> int:
+    def __init__(self, scenario: str = "scenario1", scenario2_offer_action: int = 2) -> None:
+        self.scenario = str(scenario).strip().lower()
+        self.scenario2_offer_action = int(scenario2_offer_action)
+
+    def act(self, state: np.ndarray, valid_actions=None) -> int:
         _ = state
+        if self.scenario == "scenario2":
+            chosen = self.scenario2_offer_action
+            if valid_actions:
+                if chosen in valid_actions:
+                    return int(chosen)
+                if 3 in valid_actions:
+                    return 3
+                for a in (2, 1):
+                    if a in valid_actions:
+                        return a
+                return 0
+            return int(chosen)
         return 1
 
 
 class NoOfferPolicy:
     """No-offer baseline policy: always suppress offers (action=0)."""
 
-    def act(self, state: np.ndarray) -> int:
+    def act(self, state: np.ndarray, valid_actions=None) -> int:
         _ = state
         return 0
 
@@ -98,15 +120,25 @@ def build_rl_engine(seed: int, cfg: RLConfig, policy, transition_logger: Transit
     )
     engine.print_snapshots = False
     cap = next(iter(engine.spatial.zones.values())).capacity if engine.spatial.zones else 10
-    feat_builder = Scenario1FeatureBuilder(
-        zone_ids=engine.spatial.all_zone_ids(),
-        zone_capacity=float(cap),
-        planning_period=cfg.planning_period,
-        episode_minutes=cfg.episode_minutes,
-    )
+    scenario = str(cfg.scenario).strip().lower()
+    if scenario == "scenario2":
+        feat_builder = Scenario2FeatureBuilder(
+            zone_ids=engine.spatial.all_zone_ids(),
+            zone_capacity=float(cap),
+            planning_period=cfg.planning_period,
+            episode_minutes=cfg.episode_minutes,
+        )
+    else:
+        feat_builder = Scenario1FeatureBuilder(
+            zone_ids=engine.spatial.all_zone_ids(),
+            zone_capacity=float(cap),
+            planning_period=cfg.planning_period,
+            episode_minutes=cfg.episode_minutes,
+        )
     engine.rl_policy = policy
     engine.rl_feature_builder = feat_builder
     engine.rl_transition_logger = transition_logger
+    engine.rl_scenario = scenario
     engine.rl_reward_cfg = {
         "w_l": cfg.w_l,
         "w_e": cfg.w_e,
@@ -189,6 +221,12 @@ def run_episode(seed: int, cfg: RLConfig, policy) -> tuple[EpisodeResult, Transi
         sum_realized_loss=float(tm["sum_realized_loss"]),
         mean_delta_edl=float(tm["mean_delta_edl"]),
         sum_delta_edl=float(tm["sum_delta_edl"]),
+        option_offer_low_count=int(s.get("option_offer_low_count", 0)),
+        option_offer_high_count=int(s.get("option_offer_high_count", 0)),
+        option_offer_flex_count=int(s.get("option_offer_flex_count", 0)),
+        option_offer_low_rate=float(s.get("option_offer_low_rate", 0.0)),
+        option_offer_high_rate=float(s.get("option_offer_high_rate", 0.0)),
+        option_offer_flex_rate=float(s.get("option_offer_flex_rate", 0.0)),
     )
     return result, tlog
 
@@ -198,7 +236,15 @@ def run_or_only_episode(seed: int, cfg: RLConfig) -> EpisodeResult:
     # logging so OR metrics are computed with the same reward/EDL decomposition
     # as RL, making comparisons apples-to-apples.
     tlog = TransitionLogger()
-    engine = build_rl_engine(seed=seed, cfg=cfg, policy=AlwaysOfferPolicy(), transition_logger=tlog)
+    engine = build_rl_engine(
+        seed=seed,
+        cfg=cfg,
+        policy=AlwaysOfferPolicy(
+            scenario=cfg.scenario,
+            scenario2_offer_action=cfg.scenario2_default_offer_action,
+        ),
+        transition_logger=tlog,
+    )
     logger = engine.run(sim_duration=cfg.episode_minutes)
     s = logger.summary()
     tm = _transition_metrics(tlog)
@@ -222,6 +268,12 @@ def run_or_only_episode(seed: int, cfg: RLConfig) -> EpisodeResult:
         sum_realized_loss=float(tm["sum_realized_loss"]),
         mean_delta_edl=float(tm["mean_delta_edl"]),
         sum_delta_edl=float(tm["sum_delta_edl"]),
+        option_offer_low_count=int(s.get("option_offer_low_count", 0)),
+        option_offer_high_count=int(s.get("option_offer_high_count", 0)),
+        option_offer_flex_count=int(s.get("option_offer_flex_count", 0)),
+        option_offer_low_rate=float(s.get("option_offer_low_rate", 0.0)),
+        option_offer_high_rate=float(s.get("option_offer_high_rate", 0.0)),
+        option_offer_flex_rate=float(s.get("option_offer_flex_rate", 0.0)),
     )
 
 
@@ -239,6 +291,9 @@ def transitions_to_replay(tlog: TransitionLogger, replay: ReplayBuffer) -> None:
                     "offered": int(row["offered"]),
                     "accepted": int(row["accepted"]),
                     "reject_flag": int(row["reject_flag"]),
+                    "offer_option_mode": str(row.get("offer_option_mode", "none")),
+                    "mask_block_reason": str(row.get("mask_block_reason", "none")),
+                    "fallback_stage": str(row.get("fallback_stage", "none")),
                     "delta_edl": float(row["delta_edl"]),
                     "cost_term": float(row["cost_term"]),
                     "realized_loss": float(row.get("realized_loss", 0.0)),
